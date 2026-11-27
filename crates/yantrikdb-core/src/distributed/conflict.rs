@@ -792,6 +792,18 @@ pub fn scan_claim_conflicts(db: &YantrikDB, max_conflicts: usize) -> Result<Vec<
 
     let candidates: Vec<ClaimPairCandidate> = {
         let conn = db.conn();
+        // Modality is a filter here, not decoration: only statements about the
+        // world can contradict each other. `quoted` / `hypothetical` / `denied`
+        // describe a statement about a statement and must not contest an
+        // identity fact.
+        //
+        // The exclusion is intended, not an oversight. Now that the writer
+        // stores its modality honestly, those rows drop out here — before, they
+        // were stored as "asserted" and scanned along. Widening this filter
+        // turns quotations back into factual assertions. The cost is named:
+        // `reason_codes::MODALITY_MISMATCH` is emitted by no path, so there is
+        // no compensating signal for the exclusion. Open point, not silently
+        // resolved.
         let sql = format!(
             "SELECT e1.src, e1.rel_type, e1.dst, e2.dst,
                     e1.valid_from, e1.valid_to, e2.valid_from, e2.valid_to,

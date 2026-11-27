@@ -1418,6 +1418,22 @@ fn is_sentence_opener_with(token: &str, lookup: &dyn Fn(&str) -> Option<CaseStat
 
 // ── Heuristic relation extraction (RFC 006 Phase 1) ──
 
+/// The two modalities this extractor can emit.
+///
+/// They are the producer side of `STATED_MODALITIES` in `engine/graph_ops.rs`:
+/// a claim the extractor mints has to survive the cooperative writer's
+/// validation, so the accepted list is a superset of this one. A test iterates
+/// this constant, which means a third value here fails a test instead of being
+/// refused at write time.
+pub const MODALITY_ASSERTED: &str = "asserted";
+/// Emitted when a modality cue (`reportedly`, `supposedly`, …) sits between
+/// subject and predicate.
+pub const MODALITY_REPORTED: &str = "reported";
+/// Every modality this extractor can produce. Keep in sync with the two
+/// constants above; the test `every_modality_the_extractor_emits_is_accepted`
+/// iterates it.
+pub const EXTRACTOR_MODALITIES: [&str; 2] = [MODALITY_ASSERTED, MODALITY_REPORTED];
+
 /// A candidate relation extracted from text by pattern matching.
 #[derive(Debug, Clone)]
 pub struct RelationCandidate {
@@ -2131,9 +2147,9 @@ fn bind_relations(
                 1
             };
             let modality = if cues.iter().any(|c| is_modality_key(&c.key)) {
-                "reported"
+                MODALITY_REPORTED
             } else {
-                "asserted"
+                MODALITY_ASSERTED
             };
             out.relations.push(RelationCandidate {
                 src: subj_name,
@@ -2173,7 +2189,7 @@ fn bind_relations(
                     rel_type: rel.to_string(),
                     dst: a.name.clone(),
                     polarity: 1,
-                    modality: "asserted".to_string(),
+                    modality: MODALITY_ASSERTED.to_string(),
                     confidence_band: "medium".to_string(),
                     span: Some((
                         seg_start + toks[norm[a.s]].start,

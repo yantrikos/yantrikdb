@@ -26,6 +26,9 @@ fn stated(src: &str, rel: &str, dst: &str) -> StatedClaim {
         rel_type: rel.into(),
         dst: dst.into(),
         polarity: 1,
+        modality: None,
+        span_start: None,
+        span_end: None,
         valid_from: None,
         valid_to: None,
     }

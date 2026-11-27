@@ -28,9 +28,36 @@ fn claim(src: &str, rel: &str, dst: &str) -> StatedClaim {
         rel_type: rel.into(),
         dst: dst.into(),
         polarity: 1,
+        modality: None,
+        span_start: None,
+        span_end: None,
         valid_from: None,
         valid_to: None,
     }
+}
+
+fn claim_modal(src: &str, rel: &str, dst: &str, modality: &str) -> StatedClaim {
+    StatedClaim {
+        modality: Some(modality.into()),
+        ..claim(src, rel, dst)
+    }
+}
+
+fn record(db: &YantrikDB, text: &str) -> String {
+    db.record_text(
+        text,
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &serde_json::json!({}),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -252,4 +279,470 @@ fn claims_inherit_the_records_event_time_unless_the_writer_gives_a_window() {
     db.apply_pending_ops_once(100).unwrap();
     let _ = rid2;
     assert_eq!(window("Bob Lin", "works_at", "Globex"), (None, None));
+}
+
+// ---------------------------------------------------------------------------
+// Modality — the qualifier the cooperative path used to discard.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn quoted_claim_keeps_its_modality() {
+    let (db, rid) = db_with("Vela said that Hugo leads the UNIT team.");
+    let report = db
+        .attach_claims(&rid, &[claim_modal("Hugo", "leads", "UNIT team", "quoted")])
+        .unwrap();
+    assert_eq!(report.accepted.len(), 1, "grounded quote must be accepted");
+
+    let stored: String = db
+        .conn()
+        .query_row(
+            "SELECT modality FROM claims WHERE source_memory_rid = ?1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "quoted", "the writer's modality must survive");
+}
+
+#[test]
+fn unknown_modality_is_rejected() {
+    let (db, rid) = db_with("Hugo leitet das UNIT Team.");
+    let report = db
+        .attach_claims(
+            &rid,
+            &[claim_modal("Hugo", "leads", "UNIT Team", "probably")],
+        )
+        .unwrap();
+    assert!(report.accepted.is_empty());
+    assert_eq!(report.rejected.len(), 1);
+    assert!(
+        report.rejected[0]
+            .reason
+            .contains("modality must be one of"),
+        "got {:?}",
+        report.rejected[0].reason
+    );
+}
+
+#[test]
+fn span_is_stored_as_the_local_part_of_the_observation() {
+    // The span records WHERE in the text a statement sits, so a reader can
+    // locate it. It does not let two statements coexist: the stored identity
+    // key has no span, so a second claim **from the same memory** with a
+    // different span is refused rather than merged (see
+    // `two_statements_differing_only_by_span_...`). A restatement from another
+    // memory is accepted whatever its span, because an offset into one text
+    // says nothing about another.
+    let (db, rid) =
+        db_with("Hugo leitet das UNIT Team. Spaeter sagt Vela, Hugo leitet das UNIT Team.");
+    let mut c = claim("Hugo", "leads", "UNIT Team");
+    c.span_start = Some(0);
+    c.span_end = Some(24);
+    db.attach_claims(&rid, &[c]).unwrap();
+
+    let (s, e): (Option<i32>, Option<i32>) = db
+        .conn()
+        .query_row(
+            "SELECT span_start, span_end FROM claims WHERE source_memory_rid = ?1",
+            rusqlite::params![rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((s, e), (Some(0), Some(24)));
+}
+
+#[test]
+fn missing_span_stays_null_and_does_not_invent_a_location() {
+    let (db, rid) = db_with("Hugo leitet das UNIT Team.");
+    db.attach_claims(&rid, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+    let (s, e): (Option<i32>, Option<i32>) = db
+        .conn()
+        .query_row(
+            "SELECT span_start, span_end FROM claims WHERE source_memory_rid = ?1",
+            rusqlite::params![rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((s, e), (None, None), "unknown locality must stay unknown");
+}
+
+#[test]
+fn differing_modality_on_the_same_triple_is_refused_not_overwritten() {
+    // The stored identity key is (src, dst, rel_type, extractor, polarity,
+    // namespace) — it cannot hold both statements. Before this guard the
+    // second attach silently replaced the first, qualifiers and all.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let asserted = record(&db, "Hugo leitet das UNIT Team.");
+    let quoted = record(&db, "Vela sagte, Hugo leitet das UNIT Team.");
+
+    db.attach_claims(&asserted, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+    let report = db
+        .attach_claims(
+            &quoted,
+            &[claim_modal("Hugo", "leads", "UNIT Team", "quoted")],
+        )
+        .unwrap();
+
+    assert!(
+        report.accepted.is_empty(),
+        "a quoted statement must not replace an asserted one"
+    );
+    assert_eq!(report.rejected.len(), 1);
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "got {:?}",
+        report.rejected[0].reason
+    );
+
+    let stored: String = db
+        .conn()
+        .query_row(
+            "SELECT modality FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "asserted", "the first qualifier must be intact");
+}
+
+#[test]
+fn batch_dedup_must_not_swallow_a_validity_collision() {
+    // The in-batch dedup key gained `modality`,
+    // but not the validity window. Two statements about the same triple with
+    // the same modality and different windows are two statements — they must
+    // reach the identity guard and be refused as a collision there. Today the
+    // second is discarded as a batch duplicate first, so the reason reported
+    // to the writer is wrong and the guard never sees the case.
+    let (db, rid) = db_with("Hugo leitete 2024 das UNIT Team. Hugo leitet 2026 das UNIT Team.");
+    let mut first = claim("Hugo", "leads", "UNIT Team");
+    first.valid_from = Some(1_704_067_200.0); // 2024-01-01
+    let mut second = claim("Hugo", "leads", "UNIT Team");
+    second.valid_from = Some(1_767_225_600.0); // 2026-01-01
+
+    let report = db.attach_claims(&rid, &[first, second]).unwrap();
+
+    assert_eq!(report.accepted.len(), 1, "{report:?}");
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "the second window must be refused by the guard, not dropped as a batch duplicate: {:?}",
+        report.rejected[0].reason
+    );
+    let stored: Option<f64> = db
+        .conn()
+        .query_row(
+            "SELECT valid_from FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored,
+        Some(1_704_067_200.0),
+        "the first window must survive"
+    );
+}
+
+fn record_at(db: &YantrikDB, text: &str, event_ts: f64) -> String {
+    db.record_text(
+        text,
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &serde_json::json!({"event_time_min": event_ts, "event_time_max": event_ts}),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_different_validity_window_alone_is_a_collision() {
+    // the guard compares three qualifiers, but only the modality
+    // branch had a test. The window branch is the one most likely to fire in
+    // real data, because a stated claim inherits the record's event time.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let t_2024 = 1_704_067_200.0_f64;
+    let t_2026 = 1_767_225_600.0_f64;
+    let a = record_at(&db, "Hugo leitet das UNIT Team.", t_2024);
+    let b = record_at(&db, "Hugo leitet das UNIT Team.", t_2026);
+
+    db.attach_claims(&a, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+    let report = db
+        .attach_claims(&b, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+
+    assert_eq!(report.accepted.len(), 0, "{report:?}");
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "same modality, different window must still collide: {:?}",
+        report.rejected[0].reason
+    );
+    let stored: Option<f64> = db
+        .conn()
+        .query_row(
+            "SELECT valid_from FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, Some(t_2024), "the first window must survive");
+}
+
+#[test]
+fn an_identical_resubmission_is_still_accepted() {
+    // The guard must not lock a writer out of its own row: the same statement
+    // resubmitted is a refinement, not a collision. Without this test the
+    // refusal could silently turn every retry into a rejection.
+    let (db, rid) = db_with("Hugo leitet das UNIT Team.");
+    db.attach_claims(&rid, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+    let report = db
+        .attach_claims(&rid, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+
+    assert_eq!(report.accepted.len(), 1, "{report:?}");
+    assert!(report.rejected.is_empty(), "{report:?}");
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team' AND tombstoned = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1, "an update must not create a second row");
+}
+
+#[test]
+fn an_alias_folded_endpoint_is_detected_as_the_same_identity() {
+    // The guard queries resolved names because it runs
+    // inside `ingest_claim_grounded`, after `resolve_alias`. A claim written
+    // under an alias must collide with the canonical row — otherwise the
+    // UPSERT overwrites the canonical qualifiers through the alias door.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    db.add_entity_alias("Hugo Gundlach", "Hugo", "default", "test")
+        .unwrap();
+
+    let canonical = record(&db, "Hugo leitet das UNIT Team.");
+    db.attach_claims(&canonical, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+
+    let through_alias = record(&db, "Hugo Gundlach leitet das UNIT Team.");
+    let report = db
+        .attach_claims(
+            &through_alias,
+            &[claim_modal("Hugo Gundlach", "leads", "UNIT Team", "quoted")],
+        )
+        .unwrap();
+
+    assert_eq!(report.accepted.len(), 0, "{report:?}");
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "an alias endpoint must reach the same identity: {:?}",
+        report.rejected[0].reason
+    );
+    let stored: String = db
+        .conn()
+        .query_row(
+            "SELECT modality FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "asserted", "the canonical qualifier must survive");
+
+    let alias_rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM claims WHERE src = 'Hugo Gundlach'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(alias_rows, 0, "the claim row stores resolved endpoints");
+}
+
+#[test]
+fn two_statements_differing_only_by_span_do_not_silently_merge() {
+    // Two statements of one triple cannot coexist while the identity key has no
+    // span. Making them coexist takes a claim identity that includes the
+    // observation — a different key shape, not a behaviour flag. Until then the
+    // honest answer is to REFUSE the second observation instead of accepting it
+    // as a "refinement" and replacing the first one's span.
+    let (db, rid) =
+        db_with("Hugo leitet das UNIT Team. Spaeter sagt Vela, Hugo leitet das UNIT Team.");
+    let mut first = claim("Hugo", "leads", "UNIT Team");
+    first.span_start = Some(0);
+    first.span_end = Some(24);
+    let r1 = db.attach_claims(&rid, &[first]).unwrap();
+    assert_eq!(r1.accepted.len(), 1, "{r1:?}");
+
+    let mut second = claim("Hugo", "leads", "UNIT Team");
+    second.span_start = Some(33);
+    second.span_end = Some(57);
+    let r2 = db.attach_claims(&rid, &[second]).unwrap();
+
+    assert_eq!(r2.accepted.len(), 0, "{r2:?}");
+    assert_eq!(r2.rejected.len(), 1, "{r2:?}");
+    assert!(
+        r2.rejected[0].reason.contains("identity collision"),
+        "a second observation must be refused, not merged: {:?}",
+        r2.rejected[0].reason
+    );
+    let (s, e): (Option<i32>, Option<i32>) = db
+        .conn()
+        .query_row(
+            "SELECT span_start, span_end FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((s, e), (Some(0), Some(24)), "the first span must survive");
+}
+
+/// A span is an offset into its own memory's text, so two memories' spans are
+/// never comparable. Corroboration across memories — the same fact stated again
+/// — must keep working; comparing spans turned it into a rejection.
+#[test]
+fn a_restatement_in_a_second_memory_is_accepted() {
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let m1 = record(&db, "Hugo leads the UNIT Team.");
+    let m2 = record(&db, "In today's sync, Hugo leads the UNIT Team again.");
+
+    let mut c1 = claim("Hugo", "leads", "UNIT Team");
+    c1.span_start = Some(0);
+    c1.span_end = Some(25);
+    let r1 = db.attach_claims(&m1, &[c1]).unwrap();
+    assert_eq!(r1.accepted.len(), 1, "{r1:?}");
+
+    let mut c2 = claim("Hugo", "leads", "UNIT Team");
+    c2.span_start = Some(16);
+    c2.span_end = Some(41);
+    let r2 = db.attach_claims(&m2, &[c2]).unwrap();
+
+    assert_eq!(r2.accepted.len(), 1, "{r2:?}");
+    assert!(
+        r2.rejected.is_empty(),
+        "a restatement from another memory is corroboration, not a collision: {r2:?}"
+    );
+
+    // The accepted restatement re-grounds on the newer memory: that is the
+    // behaviour on main, and it must stay that way (the row is one claim, whose
+    // provenance moves to the memory that last asserted it).
+    let stored_source: Option<String> = db
+        .conn()
+        .query_row(
+            "SELECT source_memory_rid FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored_source.as_deref(),
+        Some(m2.as_str()),
+        "an accepted restatement re-grounds on the memory that stated it"
+    );
+}
+
+/// The heuristic extractor in `knowledge/graph.rs` emits a modality of its own,
+/// and the guard compares it against `STATED_MODALITIES`. If the extractor
+/// grows a value the list does not carry, every such claim is refused at write
+/// time — a silent feature loss. This pins the relationship instead of leaving
+/// it to a comment.
+#[test]
+fn every_modality_the_extractor_emits_is_accepted() {
+    // Iterates the extractor's own constant, not a copy of its vocabulary: a
+    // third value there fails this test instead of being refused at write time.
+    for modality in crate::knowledge::graph::EXTRACTOR_MODALITIES {
+        assert!(
+            crate::engine::graph_ops::STATED_MODALITIES.contains(&modality),
+            "the extractor emits {modality:?}, which the cooperative writer must accept"
+        );
+    }
+}
+
+#[test]
+fn a_stored_null_window_collides_with_an_inherited_one() {
+    // A row written without a window and a statement whose
+    // record carries an event time describe the same statement to a reader,
+    // but `None != Some(t)`, so the second is refused. That is fail-closed on
+    // purpose — the identity has no notion of "unknown vs inherited" yet. This
+    // test pins the behaviour so a future change to that notion is visible.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let plain = record(&db, "Hugo leitet das UNIT Team.");
+    let timed = record_at(&db, "Hugo leitet das UNIT Team.", 1_704_067_200.0);
+
+    db.attach_claims(&plain, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+    let report = db
+        .attach_claims(&timed, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+
+    assert_eq!(report.accepted.len(), 0, "{report:?}");
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "unknown and inherited are two states: {:?}",
+        report.rejected[0].reason
+    );
+}
+
+#[test]
+fn a_resubmission_that_drops_the_span_is_refused() {
+    // Under the one-observation rule a retry that omits the span
+    // is a *different* statement (`None != Some(0)`), so it is refused where
+    // the older code accepted it as a refinement. That is deliberate, but it is
+    // a behaviour change — pinned here because the retry test only covers
+    // None -> None, and a writer cannot see the difference until it is rejected.
+    let (db, rid) = db_with("Hugo leitet das UNIT Team.");
+    let mut first = claim("Hugo", "leads", "UNIT Team");
+    first.span_start = Some(0);
+    first.span_end = Some(24);
+    db.attach_claims(&rid, &[first]).unwrap();
+
+    let report = db
+        .attach_claims(&rid, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+
+    assert_eq!(report.accepted.len(), 0, "{report:?}");
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "a retry without the span is a different statement: {:?}",
+        report.rejected[0].reason
+    );
+}
+
+#[test]
+fn two_spans_in_one_batch_reach_the_guard() {
+    // Same finding, batch path: the second statement must not be discarded as
+    // an in-batch duplicate before the guard can refuse it.
+    let (db, rid) =
+        db_with("Hugo leitet das UNIT Team. Spaeter sagt Vela, Hugo leitet das UNIT Team.");
+    let mut first = claim("Hugo", "leads", "UNIT Team");
+    first.span_start = Some(0);
+    first.span_end = Some(24);
+    let mut second = claim("Hugo", "leads", "UNIT Team");
+    second.span_start = Some(33);
+    second.span_end = Some(57);
+
+    let report = db.attach_claims(&rid, &[first, second]).unwrap();
+
+    assert_eq!(report.accepted.len(), 1, "{report:?}");
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "the second span must reach the guard: {:?}",
+        report.rejected[0].reason
+    );
 }

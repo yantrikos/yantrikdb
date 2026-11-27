@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::Result;
 use crate::types::{Edge, Entity};
@@ -878,6 +878,7 @@ impl YantrikDB {
             span_end,
             weight,
             grounding,
+            QualifierCollision::Overwrite,
         )
     }
 
@@ -902,6 +903,7 @@ impl YantrikDB {
         span_end: Option<i32>,
         weight: f64,
         grounding: i64,
+        collision: QualifierCollision,
     ) -> Result<String> {
         self.foreign_sqlite_precheck()?;
         let claim_id = crate::id::new_id();
@@ -936,6 +938,130 @@ impl YantrikDB {
             // so multiple sources can make conflicting claims about the same fact. Only an
             // identical resubmission (same extractor + same polarity + same namespace) is
             // treated as an update — typically a validity window refinement.
+            // The choke point for the SQL writers of claims, after alias
+            // resolution: the cooperative path, the `record.rs` batch
+            // extractor, cognition and stats all pass here. Replication does
+            // not — it writes claims by direct SQL and its UPSERT touches only
+            // weight/created_at/hlc, so it is outside this invariant.
+            //
+            // A row that exists under the same identity with different
+            // qualifiers cannot coexist with this one, and the UPSERT would
+            // silently replace it. `Refuse` reports instead: the cooperative
+            // path and the `record.rs` call site refuse. `Overwrite` is the
+            // declared policy of the callers that legitimately refine a row in
+            // place — cognition, the two stats sites (which write real
+            // `event_min` windows) and the public `ingest_claim` wrapper.
+            if collision == QualifierCollision::Refuse {
+                // No `tombstoned = 0` here: the UNIQUE key ignores tombstones
+                // and the UPSERT does not reset the flag, so a write landing on
+                // a buried row used to "succeed", replace its qualifiers and
+                // stay invisible. Now it collides and is reported; resurrection
+                // is a separate path, not a side effect.
+                let existing: Option<(
+                    String,
+                    Option<f64>,
+                    Option<f64>,
+                    Option<i32>,
+                    Option<i32>,
+                    Option<String>,
+                )> = conn
+                    .query_row(
+                        "SELECT modality, valid_from, valid_to, span_start, span_end, \
+                                source_memory_rid FROM claims \
+                         WHERE src = ?1 AND dst = ?2 AND rel_type = ?3 AND extractor = ?4 \
+                           AND polarity = ?5 AND namespace = ?6",
+                        params![
+                            src_resolved,
+                            dst_resolved,
+                            rel_type,
+                            extractor,
+                            polarity,
+                            namespace
+                        ],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+                if let Some((
+                    stored_mod,
+                    stored_from,
+                    stored_to,
+                    stored_span_s,
+                    stored_span_e,
+                    stored_memory,
+                )) = existing
+                {
+                    // A span is an offset into its own memory's text, so two
+                    // memories' spans are never comparable. Comparing them
+                    // turned ordinary corroboration — the same fact stated
+                    // again in a second memory — into a rejection, while the
+                    // same restatement without spans was accepted.
+                    //
+                    // Both sides must *have* a source memory for a comparison
+                    // to mean anything: `None == None` would make two
+                    // source-less claims look like one memory and restore the
+                    // rejection for exactly the rows that carry no provenance.
+                    let same_memory = stored_memory.is_some()
+                        && source_memory_rid.is_some()
+                        && stored_memory.as_deref() == source_memory_rid;
+                    let span_differs =
+                        same_memory && (stored_span_s != span_start || stored_span_e != span_end);
+
+                    if stored_mod != modality
+                        || stored_from != valid_from
+                        || stored_to != valid_to
+                        || span_differs
+                    {
+                        // Name what actually differs, so the writer knows what
+                        // to change instead of re-reading the whole row.
+                        let mut differ: Vec<String> = Vec::new();
+                        if stored_mod != modality {
+                            differ.push(format!("modality {stored_mod:?} -> {modality:?}"));
+                        }
+                        if stored_from != valid_from || stored_to != valid_to {
+                            differ.push(format!(
+                                "window ({stored_from:?}, {stored_to:?}) -> \
+                                 ({valid_from:?}, {valid_to:?})"
+                            ));
+                        }
+                        if span_differs {
+                            differ.push(format!(
+                                "span ({stored_span_s:?}, {stored_span_e:?}) -> \
+                                 ({span_start:?}, {span_end:?})"
+                            ));
+                        }
+                        // A window inherited from the memory's `event_time_min`
+                        // was never chosen by the writer. When that is what
+                        // collides, the message has to say what to do — and it
+                        // must not suggest copying the stored values, because
+                        // the explicit window has to express what the writer
+                        // actually means.
+                        let window_hint = if stored_from != valid_from || stored_to != valid_to {
+                            ". If this is the same statement restated, pass \
+                             valid_from/valid_to explicitly, with the values that \
+                             match what you mean rather than the stored ones: a \
+                             window inherited from the memory's event time was \
+                             never the writer's decision"
+                        } else {
+                            ""
+                        };
+                        return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                            "identity collision: ({src_resolved}, {rel_type}, {dst_resolved}) \
+                             already exists; refusing to overwrite it with {}{window_hint}",
+                            differ.join(", ")
+                        )));
+                    }
+                }
+            }
+
             conn.execute(
                 "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at, \
                  polarity, modality, valid_from, valid_to, extractor, extractor_version, \
@@ -1224,6 +1350,32 @@ pub struct StatedClaim {
     /// `1` asserted (default), `-1` denied.
     #[serde(default = "default_polarity")]
     pub polarity: i32,
+    /// How the writer is asserting it: `asserted` (default), `reported`,
+    /// `hypothetical`, `denied`, `quoted`. The schema has carried this column
+    /// since RFC 006; the cooperative path dropped it, so every quotation and
+    /// every hypothesis was stored as a plain assertion.
+    #[serde(default)]
+    pub modality: Option<String>,
+    /// Byte range of the statement inside the source memory's text — WHERE the
+    /// writer said it, not whether it said it twice. Stored so a reader can
+    /// locate the statement, and part of the statement's qualifiers: a second
+    /// claim **from the same source memory** with a different span is refused
+    /// by the identity guard instead of overwriting the first (see
+    /// `QualifierCollision`). Across memories spans are not comparable — each
+    /// is an offset into its own text — so a restatement from another memory is
+    /// accepted regardless of its span.
+    ///
+    /// A span does not let two observations coexist: the stored uniqueness key
+    /// has no span. Making them coexist takes a claim identity that includes
+    /// the observation, so two statements of one triple can both be stored; the
+    /// key would then be `(src, dst, rel_type, extractor, polarity, namespace,
+    /// source memory, span)` instead of the current one.
+    /// `None` means the writer did not say where — not that the statement
+    /// occurs only once.
+    #[serde(default)]
+    pub span_start: Option<i32>,
+    #[serde(default)]
+    pub span_end: Option<i32>,
     /// World-validity start (unix seconds): when the stated fact became
     /// true, not when it was written. Absent, the memory's own event time
     /// (`event_time_min`, the temporal tag on the record) is used; absent
@@ -1238,6 +1390,35 @@ pub struct StatedClaim {
     pub valid_to: Option<f64>,
 }
 
+/// The five modalities a `StatedClaim` may carry. `claims.modality` is a DDL
+/// comment rather than a CHECK constraint, so the cooperative writer validates
+/// here instead.
+///
+/// This list is the authority for what the cooperative path accepts; the column
+/// itself is defined in `schema.rs`. It is a superset of what the heuristic
+/// extractor in `knowledge/graph.rs` emits today (`asserted`, `reported`), and
+/// `every_modality_the_extractor_emits_is_accepted` pins that relationship — a
+/// new extractor value fails a test instead of being refused at write time.
+pub const STATED_MODALITIES: [&str; 5] =
+    ["asserted", "reported", "hypothetical", "denied", "quoted"];
+
+/// What a writer wants when its claim lands on an identity that already exists
+/// with *different* qualifiers (modality or validity window).
+///
+/// The stored uniqueness key `(src, dst, rel_type, extractor, polarity,
+/// namespace)` cannot hold both statements, so "insert" always means "replace
+/// the row". `Refuse` turns that silent replacement into a typed error the
+/// caller can report; `Overwrite` is the declared policy of the callers that
+/// legitimately refine a row in place (cognition, stats, the public
+/// `ingest_claim` wrapper — see the call sites). It is a choice, not a default:
+/// `ingest_claim_grounded` takes it as a required argument, so a new writer
+/// cannot inherit it by omission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualifierCollision {
+    Refuse,
+    Overwrite,
+}
+
 impl Default for StatedClaim {
     fn default() -> Self {
         Self {
@@ -1245,6 +1426,9 @@ impl Default for StatedClaim {
             rel_type: String::new(),
             dst: String::new(),
             polarity: 1,
+            modality: None,
+            span_start: None,
+            span_end: None,
             valid_from: None,
             valid_to: None,
         }
@@ -1459,8 +1643,20 @@ impl super::YantrikDB {
             accepted: Vec::new(),
             rejected: Vec::new(),
         };
-        let mut seen_in_batch: std::collections::HashSet<(String, String, String, i32)> =
-            std::collections::HashSet::new();
+        // Key includes every qualifier that decides whether two claims are the
+        // same statement: modality, the validity window and the span. f64 is
+        // not Hash, so a timestamp enters as its bit pattern.
+        let mut seen_in_batch: std::collections::HashSet<(
+            String,
+            String,
+            String,
+            i32,
+            String,
+            Option<u64>,
+            Option<u64>,
+            Option<i32>,
+            Option<i32>,
+        )> = std::collections::HashSet::new();
 
         for claim in claims {
             let src = claim.src.trim();
@@ -1483,6 +1679,17 @@ impl super::YantrikDB {
             if claim.polarity != 1 && claim.polarity != -1 {
                 reject(
                     "polarity must be 1 (asserted) or -1 (denied)".into(),
+                    &mut report,
+                );
+                continue;
+            }
+            // Modality is a documented vocabulary, not a CHECK constraint, so
+            // it is validated here. An unknown value would be stored verbatim
+            // and silently mean nothing to every reader.
+            let modality = claim.modality.as_deref().unwrap_or("asserted");
+            if !STATED_MODALITIES.contains(&modality) {
+                reject(
+                    format!("modality must be one of {STATED_MODALITIES:?}, got {modality:?}"),
                     &mut report,
                 );
                 continue;
@@ -1532,11 +1739,25 @@ impl super::YantrikDB {
                 );
                 continue;
             }
+            let valid_from = claim.valid_from.or(event_min);
             if !seen_in_batch.insert((
                 src.to_lowercase(),
                 rel.clone(),
                 dst.to_lowercase(),
                 claim.polarity,
+                // Modality is part of the statement, not a duplicate marker:
+                // an asserted and a quoted claim for the same triple are two
+                // statements, and the second must reach the identity guard
+                // instead of being dropped here as a batch duplicate.
+                modality.to_string(),
+                // Same for the validity window: two statements about the same
+                // triple with different windows are two statements.
+                valid_from.map(f64::to_bits),
+                claim.valid_to.map(f64::to_bits),
+                // And the span: it is the local part of the observation, so a
+                // different span is a different observation.
+                claim.span_start,
+                claim.span_end,
             )) {
                 reject(
                     "duplicate of an earlier claim in this batch".into(),
@@ -1544,23 +1765,42 @@ impl super::YantrikDB {
                 );
                 continue;
             }
-            let claim_id = self.ingest_claim(
+            // The collision policy is declared here and enforced at the choke
+            // point (`ingest_claim_grounded`), after alias resolution — so the
+            // check sees the same names the UPSERT will use, and every future
+            // writer has to choose a policy explicitly.
+            let claim_id = match self.ingest_claim_grounded(
                 src,
                 &rel,
                 dst,
                 &memory.namespace,
                 claim.polarity,
-                "asserted",
-                claim.valid_from.or(event_min),
+                modality,
+                valid_from,
                 claim.valid_to,
                 STATED_CLAIM_EXTRACTOR,
                 Some("1.0"),
                 "high",
                 Some(memory_rid),
-                None,
-                None,
+                claim.span_start,
+                claim.span_end,
                 1.0,
-            )?;
+                crate::engine::claims_lane::GROUNDING_COOPERATIVE,
+                QualifierCollision::Refuse,
+            ) {
+                Ok(id) => id,
+                // Refused at the choke point: the identity already exists with
+                // different qualifiers. Reported per claim, not replaced.
+                Err(e @ crate::error::YantrikDbError::InvalidInput(_)) => {
+                    reject(format!("{e}"), &mut report);
+                    continue;
+                }
+                // A store failure is not a statement about this claim.
+                // A catch-all here turned a broken store into a
+                // batch full of ordinary "rejected" rows, with the other claims
+                // already committed and the call still returning `Ok`.
+                Err(e) => return Err(e),
+            };
             // The memory now carries its endpoints as entities SYNCHRONOUSLY —
             // a stated claim closes the materializer's read-your-writes gap
             // for exactly the entities the writer cared about.
