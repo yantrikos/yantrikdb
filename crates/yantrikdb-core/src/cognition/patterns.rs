@@ -988,7 +988,6 @@ pub fn get_patterns(
     Ok(rows)
 }
 
-
 /// Does this pattern type record per-record evidence?
 ///
 /// Four miners derive a pattern from aggregates and write no `pattern_evidence`
@@ -1039,13 +1038,17 @@ mod tests {
         raw.iter().map(|x| x / norm).collect()
     }
 
-
     #[test]
     fn test_evidence_is_tracked_marks_aggregate_miners_untracked() {
         // The four miners that derive a pattern from aggregates write no
         // pattern_evidence rows. Reporting 0 for them would claim "we looked
         // and found none"; the answer is "not tracked" (None in Python).
-        for t in ["co_occurrence", "valence_trend", "entity_hub", "entity_bridge"] {
+        for t in [
+            "co_occurrence",
+            "valence_trend",
+            "entity_hub",
+            "entity_bridge",
+        ] {
             assert!(!evidence_is_tracked(t), "{t} should be untracked");
         }
         for t in ["temporal_cluster", "causal", "some_future_type"] {
@@ -1105,7 +1108,10 @@ mod tests {
         );
 
         // A pattern with no evidence rows at all is a 0 for a tracked type.
-        assert_eq!(pattern_evidence_counts(&db, "no-such-pattern").unwrap(), (0, 0));
+        assert_eq!(
+            pattern_evidence_counts(&db, "no-such-pattern").unwrap(),
+            (0, 0)
+        );
     }
 
     #[test]
