@@ -432,7 +432,11 @@ pub fn persisted_trigger_to_dict(
 }
 
 /// Convert an yantrikdb-core Pattern to a Python dict.
-pub fn pattern_to_dict(py: Python<'_>, p: &yantrikdb_core::Pattern) -> PyResult<PyObject> {
+pub fn pattern_to_dict(
+    py: Python<'_>,
+    p: &yantrikdb_core::Pattern,
+    evidence_counts: Option<(i64, i64)>,
+) -> PyResult<PyObject> {
     let dict = PyDict::new(py);
     dict.set_item("pattern_id", &p.pattern_id)?;
     dict.set_item("pattern_type", &p.pattern_type)?;
@@ -447,6 +451,26 @@ pub fn pattern_to_dict(py: Python<'_>, p: &yantrikdb_core::Pattern) -> PyResult<
     dict.set_item("first_seen", p.first_seen)?;
     dict.set_item("last_confirmed", p.last_confirmed)?;
     dict.set_item("occurrence_count", p.occurrence_count)?;
+    // Issue #88: support counts are derived at read time.
+    //   evidence_total       = support rows recorded for this pattern,
+    //                          INCLUDING the ones counted as tombstoned
+    //                          (it answers "how much support was there",
+    //                          not "how much is alive")
+    //   evidence_tombstoned  = of those, the ones whose memory is tombstoned
+    //                          or gone
+    //   both None            = this pattern type records no evidence and this
+    //                          pattern has no evidence rows; `None` is not the
+    //                          same claim as `0`.
+    match evidence_counts {
+        Some((total, tombstoned)) => {
+            dict.set_item("evidence_total", total)?;
+            dict.set_item("evidence_tombstoned", tombstoned)?;
+        }
+        None => {
+            dict.set_item("evidence_total", py.None())?;
+            dict.set_item("evidence_tombstoned", py.None())?;
+        }
+    }
     Ok(dict.into())
 }
 

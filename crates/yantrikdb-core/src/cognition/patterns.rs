@@ -988,6 +988,45 @@ pub fn get_patterns(
     Ok(rows)
 }
 
+
+/// Does this pattern type record per-record evidence?
+///
+/// Four miners derive a pattern from aggregates and write no `pattern_evidence`
+/// rows at all (`co_occurrence`, `valence_trend`, `entity_hub`, `entity_bridge`).
+/// For them the count is *unknown*, not zero — reporting `0` would claim "we
+/// looked and found none", which is a different and false statement.
+pub fn evidence_is_tracked(pattern_type: &str) -> bool {
+    !matches!(
+        pattern_type,
+        "co_occurrence" | "valence_trend" | "entity_hub" | "entity_bridge"
+    )
+}
+
+/// `(total, tombstoned)` evidence rows for one pattern, counted at read time.
+///
+/// `pattern_evidence` is append-only: `forget` tombstones the memory and leaves
+/// the join row behind, so counting the join alone would report dead support as
+/// live. The LEFT JOIN keeps a row whose memory is gone countable as *total*
+/// (the support was genuinely recorded) while counting it as tombstoned.
+///
+/// No stored increments and no migration: a replica that tombstones a record
+/// is reflected the next time anyone reads, which is the whole point.
+pub fn pattern_evidence_counts(db: &YantrikDB, pattern_id: &str) -> Result<(i64, i64)> {
+    let conn = db.conn();
+    conn.query_row(
+        "SELECT COUNT(pe.rid), \
+                COALESCE(SUM(CASE WHEN m.rid IS NULL
+                                   OR m.consolidation_status = 'tombstoned'
+                             THEN 1 ELSE 0 END), 0) \
+           FROM pattern_evidence pe \
+           LEFT JOIN memories m ON m.rid = pe.rid \
+          WHERE pe.pattern_id = ?1",
+        rusqlite::params![pattern_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -998,6 +1037,75 @@ mod tests {
             .collect();
         let norm: f32 = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
         raw.iter().map(|x| x / norm).collect()
+    }
+
+
+    #[test]
+    fn test_evidence_is_tracked_marks_aggregate_miners_untracked() {
+        // The four miners that derive a pattern from aggregates write no
+        // pattern_evidence rows. Reporting 0 for them would claim "we looked
+        // and found none"; the answer is "not tracked" (None in Python).
+        for t in ["co_occurrence", "valence_trend", "entity_hub", "entity_bridge"] {
+            assert!(!evidence_is_tracked(t), "{t} should be untracked");
+        }
+        for t in ["temporal_cluster", "causal", "some_future_type"] {
+            assert!(evidence_is_tracked(t), "{t} should be tracked");
+        }
+    }
+
+    #[test]
+    fn test_pattern_evidence_counts_splits_tombstoned_from_total() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let mut rids = Vec::new();
+        for i in 0..3 {
+            let rid = db
+                .record(
+                    &format!("support {i}"),
+                    "episodic",
+                    0.5,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &vec_seed(700.0 + i as f32, 8),
+                    "default",
+                    0.8,
+                    "general",
+                    "user",
+                    None,
+                )
+                .unwrap();
+            rids.push(rid);
+        }
+        db.conn()
+            .execute(
+                "INSERT INTO patterns (pattern_id, pattern_type, status, confidence, \
+                 description, evidence_rids, entity_names, context, first_seen, \
+                 last_confirmed, occurrence_count, hlc, origin_actor) \
+                 VALUES ('p1', 'temporal_cluster', 'active', 0.5, 'd', '[]', '[]', '{}', 0.0, 0.0, 1, x'0000000000000000', 'test')",
+                [],
+            )
+            .unwrap();
+        for rid in &rids {
+            db.conn()
+                .execute(
+                    "INSERT INTO pattern_evidence (pattern_id, rid) VALUES ('p1', ?1)",
+                    params![rid],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(pattern_evidence_counts(&db, "p1").unwrap(), (3, 0));
+
+        // One support is forgotten: the join row stays, the memory does not.
+        db.forget(&rids[0]).unwrap();
+        assert_eq!(
+            pattern_evidence_counts(&db, "p1").unwrap(),
+            (3, 1),
+            "total keeps the recorded support; exactly one is tombstoned"
+        );
+
+        // A pattern with no evidence rows at all is a 0 for a tracked type.
+        assert_eq!(pattern_evidence_counts(&db, "no-such-pattern").unwrap(), (0, 0));
     }
 
     #[test]

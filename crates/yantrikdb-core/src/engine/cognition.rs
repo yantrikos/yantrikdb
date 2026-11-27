@@ -671,4 +671,9 @@ impl YantrikDB {
     ) -> Result<Vec<Pattern>> {
         crate::patterns::get_patterns(self, pattern_type, status, limit)
     }
+
+    /// `(total, tombstoned)` evidence rows for one pattern, read at query time.
+    pub fn pattern_evidence_counts(&self, pattern_id: &str) -> Result<(i64, i64)> {
+        crate::patterns::pattern_evidence_counts(self, pattern_id)
+    }
 }

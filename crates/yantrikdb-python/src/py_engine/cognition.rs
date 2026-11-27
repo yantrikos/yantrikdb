@@ -166,8 +166,37 @@ impl PyYantrikDB {
         limit: usize,
     ) -> PyResult<Vec<PyObject>> {
         let py = slf.py();
-        let patterns = Self::detached(slf, |db| db.get_patterns(pattern_type, status, limit))?;
-        patterns.iter().map(|p| pattern_to_dict(py, p)).collect()
+        // Counts and rows in ONE detached section, so the GIL is released
+        // once for the whole page instead of once per pattern. It is not a
+        // snapshot: `db.conn()` takes the connection mutex per call, so a
+        // concurrent `forget` can land between two rows of this page. Each
+        // individual (total, tombstoned) pair is one SELECT and is internally
+        // consistent; cross-row consistency is not promised here.
+        let rows = Self::detached(slf, |db| {
+            let patterns = db.get_patterns(pattern_type, status, limit)?;
+            let mut out = Vec::with_capacity(patterns.len());
+            for p in patterns {
+                let counts = db.pattern_evidence_counts(&p.pattern_id)?;
+                // Data first, type second: if the pattern HAS evidence rows,
+                // the numbers are facts and are reported whatever the type
+                // says. `None` is reserved for "this type records no evidence
+                // and this pattern has none" — so a miner that starts writing
+                // evidence for a previously untracked type cannot be hidden
+                // behind the static list.
+                let counts = if counts.0 > 0
+                    || yantrikdb_core::patterns::evidence_is_tracked(&p.pattern_type)
+                {
+                    Some(counts)
+                } else {
+                    None
+                };
+                out.push((p, counts));
+            }
+            Ok(out)
+        })?;
+        rows.iter()
+            .map(|(p, counts)| pattern_to_dict(py, p, *counts))
+            .collect()
     }
 
     // ── Personality API (V11) ──
