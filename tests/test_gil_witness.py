@@ -217,6 +217,48 @@ def test_record_with_a_python_embedder_releases_the_gil(db):
     assert _seen_during(lambda: db.record("witness record about topic 3")) >= 1
 
 
+def _correcting(store, rid):
+    # A text-changing correction supersedes its target and returns a new
+    # rid, so each repeat corrects the latest version, as a caller would.
+    latest = {"rid": rid, "n": 0}
+
+    def call():
+        latest["n"] += 1
+        out = store.correct(
+            latest["rid"], "witness", new_text=f"witness correction {latest['n']} about topic 3"
+        )
+        latest["rid"] = out["corrected_rid"]
+
+    return call
+
+
+@needs_a_second_cpu
+def test_correct_without_new_text_releases_the_gil(db):
+    rid = db.record("witness record to correct")
+    assert _seen_during(lambda: db.correct(rid, "witness", new_importance=0.7)) >= 1
+
+
+@needs_a_second_cpu
+def test_correct_with_a_python_embedder_releases_the_gil(db):
+    # encode() runs with the GIL held (it is Python); the write after it must not.
+    rid = db.record("witness record to correct about topic 3")
+    assert _seen_during(_correcting(db, rid)) >= 1
+
+
+@needs_a_second_cpu
+def test_correct_with_the_engine_embedder_releases_the_gil(tmp_path):
+    # 64 dims: the bundled engine-native embedder is attached, no Python one,
+    # so the re-embed itself runs inside the detached engine call.
+    store = YantrikDB(os.path.join(str(tmp_path), "native-correct.db"), 64)
+    try:
+        if not store.has_embedder():
+            pytest.skip("this build has no bundled engine embedder")
+        rid = store.record("native witness record to correct")
+        assert _seen_during(_correcting(store, rid)) >= 1
+    finally:
+        store.close()
+
+
 @needs_a_second_cpu
 def test_record_with_the_engine_embedder_releases_the_gil(tmp_path):
     # 64 dims: the bundled engine-native embedder is attached, no Python one.
