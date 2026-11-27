@@ -112,6 +112,10 @@ pub enum PayloadVariant {
 }
 
 impl PayloadVariant {
+    /// Tag allocation is part of the on-disk contract: tags 1–3 are taken, and
+    /// 4/5 are reserved by `docs/V0.10_ITEM4_DESIGN.md` for the two op kinds it
+    /// names but the code does not have yet (batch items currently fold into
+    /// tag 1). A future variant must take a fresh tag, never reuse one.
     fn tag(self) -> u8 {
         match self {
             PayloadVariant::Record => 1,
@@ -175,7 +179,10 @@ impl<'a> PayloadView<'a> {
                 PayloadVariant::RecordText => None,
                 // A consolidation reaches this view only through `record()`-
                 // shaped structs; the explicit-vector path builds its view by
-                // hand, so the caller-supplied vector is `None` here.
+                // hand (engine/record.rs), so the caller-supplied vector is
+                // `None` here. If that ever changes, this arm must switch to
+                // `Some(&input.embedding)` — the two constructions would
+                // otherwise disagree for the same variant.
                 PayloadVariant::Consolidation => None,
             },
             created_at: input.created_at,

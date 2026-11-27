@@ -138,7 +138,13 @@ fn synthesis_replay_survives_a_recall_that_does_not_reinforce() {
     let rids = seed(&db, &["alpha one", "alpha two"]);
 
     let first = synthesis(&db, &rids, SYNTH_TEXT, "k-skip").unwrap();
+    let before = stored_half_life(&db, &rids[0]);
     recall_once(&db, true);
+    let after = stored_half_life(&db, &rids[0]);
+    assert_eq!(
+        after, before,
+        "skip_reinforce must not move the half-life — otherwise this arm is not the control"
+    );
     let second = synthesis(&db, &rids, SYNTH_TEXT, "k-skip").unwrap();
     assert_eq!(second["idempotent_replay"], true);
     assert_eq!(second["consolidated_rid"], first["consolidated_rid"]);
@@ -215,15 +221,20 @@ fn summary_replay_without_a_recall_still_replays() {
     assert_eq!(second["consolidated_rid"], first["consolidated_rid"]);
 }
 
-/// A stored digest from before the fix keeps conflicting — for every retry.
+/// A stored digest that differs keeps conflicting — for every retry.
 ///
-/// The old rule fed `half_life`, so a key written by an earlier version holds a
-/// digest this one cannot reproduce. `resolve_existing` returns the conflict
-/// without touching the stored row, so the mismatch is permanent for that key
-/// and the caller must mint a new one. This is the upgrade cost of the fix,
-/// measured rather than assumed.
+/// Scope, stated honestly: this test plants a byte-different digest, it does not
+/// construct a pre-fix one. What it proves is the *mechanism* — `resolve_existing`
+/// returns the conflict without touching the stored row, so the key stays
+/// unusable no matter how often the caller retries — and that is the half that
+/// decides whether the upgrade cost is "once" or "forever".
+///
+/// The other half (that the pre-fix digest really is byte-different) was
+/// reproduced independently by writing a synthesis with the pre-fix rule and
+/// retrying against the fixed code: both attempts conflicted, the stored digest
+/// stayed byte-identical.
 #[test]
-fn a_stored_digest_from_the_old_rule_keeps_conflicting() {
+fn a_stored_digest_that_differs_is_permanently_unusable() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let rids = seed(&db, &["gamma one", "gamma two"]);
     synthesis(&db, &rids, SYNTH_TEXT, "k-old").unwrap();
@@ -339,6 +350,36 @@ fn a_changed_source_set_is_a_new_generation_not_a_conflict() {
         )
         .unwrap();
     assert_eq!(verified, 1, "exactly one generation may be current");
+}
+
+#[test]
+fn summary_replay_survives_a_recall_that_does_not_reinforce() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rids = seed(&db, &["beta one", "beta two"]);
+
+    let first = crate::consolidate::summarize_cluster_with_key(
+        &db,
+        &rids,
+        "Beta shipped too.",
+        Some(&vec_seed(9.0, 8)),
+        "k-sum-skip",
+    )
+    .unwrap();
+    let before = stored_half_life(&db, &rids[0]);
+    recall_once(&db, true);
+    let after = stored_half_life(&db, &rids[0]);
+    assert_eq!(after, before, "skip_reinforce must not move the half-life");
+
+    let second = crate::consolidate::summarize_cluster_with_key(
+        &db,
+        &rids,
+        "Beta shipped too.",
+        Some(&vec_seed(9.0, 8)),
+        "k-sum-skip",
+    )
+    .unwrap();
+    assert_eq!(second["idempotent_replay"], true);
+    assert_eq!(second["consolidated_rid"], first["consolidated_rid"]);
 }
 
 #[test]
