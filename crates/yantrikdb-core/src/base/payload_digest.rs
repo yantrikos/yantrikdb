@@ -102,6 +102,13 @@ pub enum PayloadVariant {
     Record,
     /// `record_text()` — engine embeds the text; the generated vector is excluded.
     RecordText,
+    /// A write made by `commit_consolidation` (a synthesis, or a summary with a
+    /// caller key). Its `half_life` is DERIVED from the sources' *current*
+    /// values (`max(sources) * 1.5`), and a plain `recall` reinforces those by
+    /// 1.2 — so the derived value would make an honest retry look like a
+    /// different payload. It is therefore not fed into the digest (#330, the
+    /// same class of defect #293 fixed for `consolidation_time`).
+    Consolidation,
 }
 
 impl PayloadVariant {
@@ -109,6 +116,7 @@ impl PayloadVariant {
         match self {
             PayloadVariant::Record => 1,
             PayloadVariant::RecordText => 2,
+            PayloadVariant::Consolidation => 3,
         }
     }
 }
@@ -165,6 +173,10 @@ impl<'a> PayloadView<'a> {
             embedding: match variant {
                 PayloadVariant::Record => Some(&input.embedding),
                 PayloadVariant::RecordText => None,
+                // A consolidation reaches this view only through `record()`-
+                // shaped structs; the explicit-vector path builds its view by
+                // hand, so the caller-supplied vector is `None` here.
+                PayloadVariant::Consolidation => None,
             },
             created_at: input.created_at,
         }
@@ -326,7 +338,11 @@ pub fn payload_digest(v: &PayloadView<'_>) -> [u8; 32] {
     feed_str(&mut h, v.memory_type);
     feed_f64(&mut h, v.importance);
     feed_f64(&mut h, v.valence);
-    feed_f64(&mut h, v.half_life);
+    // #330: a consolidation's half_life is derived from the sources' current
+    // state, and reading them moves it. It must not decide idempotency.
+    if !matches!(v.variant, PayloadVariant::Consolidation) {
+        feed_f64(&mut h, v.half_life);
+    }
     feed_f64(&mut h, v.certainty);
     feed_str(&mut h, v.domain);
     feed_str(&mut h, v.source);

@@ -62,5 +62,6 @@ mod source_turn_columns;
 #[cfg(feature = "bundled-embedder")]
 mod stated_claims;
 mod storage_fts;
+mod synthesis_idempotency;
 mod trace_entities;
 mod write_stats;

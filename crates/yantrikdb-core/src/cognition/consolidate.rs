@@ -1520,6 +1520,7 @@ fn commit_consolidation(
                     idempotency_key,
                     summary_created_at,
                     admission.as_ref(),
+                    crate::payload_digest::PayloadVariant::Consolidation,
                     &capturing,
                 )?
             }
@@ -1539,6 +1540,7 @@ fn commit_consolidation(
                 idempotency_key,
                 summary_created_at,
                 admission.as_ref(),
+                crate::payload_digest::PayloadVariant::Consolidation,
             )?,
             // Engine-embedded: the vector comes from the synthesis itself.
             ClusterVector::Engine => db.record_text_with_idempotency_sync_only(
@@ -1556,6 +1558,7 @@ fn commit_consolidation(
                 idempotency_key,
                 summary_created_at,
                 admission.as_ref(),
+                crate::payload_digest::PayloadVariant::Consolidation,
             )?,
         };
 
