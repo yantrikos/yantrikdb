@@ -230,9 +230,10 @@ fn summary_replay_without_a_recall_still_replays() {
 /// decides whether the upgrade cost is "once" or "forever".
 ///
 /// The other half (that the pre-fix digest really is byte-different) was
-/// reproduced independently by writing a synthesis with the pre-fix rule and
-/// retrying against the fixed code: both attempts conflicted, the stored digest
-/// stayed byte-identical.
+/// reproduced in two stages — write under the pre-fix rule, then retry against
+/// the fixed code — with both attempts conflicting and the stored digest left
+/// byte-identical. That reproduction and its output are in the discussion of
+/// the issue that asked for this fix, not in this file.
 #[test]
 fn a_stored_digest_that_differs_is_permanently_unusable() {
     let db = YantrikDB::new(":memory:", 8).unwrap();

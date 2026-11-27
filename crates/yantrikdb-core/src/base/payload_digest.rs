@@ -112,10 +112,11 @@ pub enum PayloadVariant {
 }
 
 impl PayloadVariant {
-    /// Tag allocation is part of the on-disk contract: tags 1–3 are taken, and
-    /// 4/5 are reserved by `docs/V0.10_ITEM4_DESIGN.md` for the two op kinds it
-    /// names but the code does not have yet (batch items currently fold into
-    /// tag 1). A future variant must take a fresh tag, never reuse one.
+    /// Tag allocation is part of the on-disk contract: 1–3 are taken. The design
+    /// doc (`docs/V0.10_ITEM4_DESIGN.md`) names two further op kinds the code
+    /// does not implement as variants yet — batch items currently fold into
+    /// tag 1 — so if they ever become variants they must take fresh tags. A new
+    /// variant never reuses an existing number.
     fn tag(self) -> u8 {
         match self {
             PayloadVariant::Record => 1,
