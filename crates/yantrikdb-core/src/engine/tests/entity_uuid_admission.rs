@@ -308,3 +308,40 @@ fn ingest_claim_with_a_rid_endpoint_mints_no_index_node_or_edge() {
     );
     assert_eq!(gi.edge_count(), 0, "no hop through a record id");
 }
+
+/// The shape rule is a **whole-name** rule, and that boundary is deliberate.
+///
+/// #322 asks for "UUID-shaped names only — 8-4-4-4-12 or 32 contiguous hex
+/// digits, whole name". A decorated id (`{…}`, one character of prefix or
+/// suffix) is a different name, so it is admitted today and would become an
+/// entity. Pinned here so the boundary cannot drift silently: if it should be
+/// stricter, the rule changes here first, with its own tests.
+///
+/// URN spellings fail for an unrelated reason — `ENTITY_MAX_CHARS` is 40 and
+/// `urn:uuid:` plus 36 characters is 45 — so their refusal is *not* evidence
+/// about this rule and is deliberately not asserted.
+#[test]
+fn the_shape_rule_is_whole_name_only() {
+    use crate::knowledge::graph::{is_rejected_entity_name, is_uuid_shaped};
+
+    assert!(is_uuid_shaped(LOWER), "a bare record id is uuid-shaped");
+    assert!(
+        is_rejected_entity_name(LOWER),
+        "a bare record id must be refused as an entity name"
+    );
+
+    for decorated in [
+        format!("{{{LOWER}}}"),
+        format!("x{LOWER}"),
+        format!("{LOWER}x"),
+    ] {
+        assert!(
+            !is_uuid_shaped(&decorated),
+            "{decorated} is not a whole-name uuid, by the written rule"
+        );
+        assert!(
+            !is_rejected_entity_name(&decorated),
+            "{decorated} is admitted — that is the documented scope, not an accident"
+        );
+    }
+}
