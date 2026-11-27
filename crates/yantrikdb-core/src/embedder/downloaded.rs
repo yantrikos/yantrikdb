@@ -315,13 +315,12 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
         .ok_or_else(|| YantrikDbError::InvalidInput("cache dir has no parent".into()))?;
     std::fs::create_dir_all(parent)
         .map_err(|e| YantrikDbError::InvalidInput(format!("mkdir {}: {e}", parent.display())))?;
-    let tmp_dir = parent.join(format!(
-        "{}-{}.tmp.{}",
-        name,
-        model.release_tag,
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&tmp_dir); // cleanup any prior crash
+    // One directory per fetch, never shared: since #271 the Python binding
+    // fetches with the GIL released, so two threads of one process can be
+    // here at once, and a name keyed by pid alone let the second one
+    // `remove_dir_all` the first one's half-extracted files.
+    sweep_stale_extract_dirs(parent);
+    let tmp_dir = parent.join(extract_dir_name(name, model.release_tag));
     std::fs::create_dir_all(&tmp_dir).map_err(|e| {
         YantrikDbError::InvalidInput(format!("mkdir tmp {}: {e}", tmp_dir.display()))
     })?;
@@ -341,21 +340,7 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
         e
     })?;
 
-    // Final move: rename tmp_dir → final_dir. If a concurrent process
-    // beat us to it, both renames may run; the second one fails and we
-    // accept whatever's already there.
-    if !cache_is_populated(&final_dir) {
-        std::fs::rename(&tmp_dir, &final_dir).map_err(|e| {
-            YantrikDbError::InvalidInput(format!(
-                "rename {} -> {}: {e}",
-                tmp_dir.display(),
-                final_dir.display()
-            ))
-        })?;
-    } else {
-        // Cleanup our tmp on the rare race-loss path.
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-    }
+    promote_extracted(&tmp_dir, &final_dir)?;
 
     if !cache_is_populated(&final_dir) {
         return Err(YantrikDbError::InvalidInput(format!(
@@ -371,6 +356,67 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
         "model ready"
     );
     Ok(final_dir)
+}
+
+/// The extraction directory's name for one fetch: unique per process
+/// (pid) AND per fetch within it (a process-wide counter), so concurrent
+/// fetches never share one. A crashed fetch's directory is left behind
+/// rather than removed by the next fetch: nothing can tell a dead fetch's
+/// directory from a live one's in another thread. They are swept by age
+/// instead ([`sweep_stale_extract_dirs`]).
+fn extract_dir_name(name: &str, release_tag: &str) -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{name}-{release_tag}.tmp.{}.{n}", std::process::id())
+}
+
+/// Remove extraction directories (`<name>-<tag>.tmp.<pid>.<n>`) that crashed
+/// fetches left in the model cache, but only ones untouched for a day. A
+/// live fetch writes its directory within minutes (download, verify,
+/// extract), so a day-old one is no fetch's work in progress; a fresh one
+/// may be another thread's or another process's, and stays. Best-effort.
+fn sweep_stale_extract_dirs(cache_root: &std::path::Path) {
+    const STALE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+    let Ok(entries) = std::fs::read_dir(cache_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().contains(".tmp.") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= STALE);
+        if stale && entry.path().is_dir() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Move a fully extracted `tmp_dir` into place as `final_dir`. A fetch
+/// that loses the race to another (thread or process) finds the cache
+/// already populated, before or after its own rename fails, and accepts
+/// it; either way `tmp_dir` is gone afterwards.
+fn promote_extracted(tmp_dir: &std::path::Path, final_dir: &std::path::Path) -> Result<()> {
+    if cache_is_populated(final_dir) {
+        let _ = std::fs::remove_dir_all(tmp_dir);
+        return Ok(());
+    }
+    if let Err(e) = std::fs::rename(tmp_dir, final_dir) {
+        let _ = std::fs::remove_dir_all(tmp_dir);
+        if !cache_is_populated(final_dir) {
+            return Err(YantrikDbError::InvalidInput(format!(
+                "rename {} -> {}: {e}",
+                tmp_dir.display(),
+                final_dir.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Wrapper `Embedder` impl that delegates to a loaded `StaticModel`.
@@ -650,5 +696,91 @@ mod tests {
         let total: u64 = (1..DOWNLOAD_ATTEMPTS).map(|a| 1u64 << (a - 1)).sum();
         assert_eq!(total, 7, "expected 1s+2s+4s of backoff, got {total}s");
         assert!(total <= 10, "an offline caller must not wait minutes");
+    }
+
+    /// Two fetches in one process must never share an extraction dir: the
+    /// binding fetches with the GIL released (#271), and with a pid-only
+    /// name the second fetch deleted the first one's files mid-extract.
+    #[test]
+    fn concurrent_fetches_get_distinct_extraction_dirs() {
+        let names: Vec<String> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        (0..50)
+                            .map(|_| extract_dir_name("potion-base-8M", "v0.1.0"))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect()
+        });
+        let distinct: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(distinct.len(), names.len(), "extraction dirs collided");
+        assert!(names
+            .iter()
+            .all(|n| n.contains(&format!(".tmp.{}.", std::process::id()))));
+    }
+
+    /// The fetch that loses the race finds the cache populated and accepts
+    /// it; neither extraction dir is left behind.
+    #[test]
+    fn promoting_twice_into_one_cache_dir_accepts_the_winner() {
+        let root = tempfile::tempdir().unwrap();
+        let final_dir = root.path().join("potion-base-8M-v0.1.0");
+        let mut tmps = Vec::new();
+        for i in 0..2 {
+            let tmp = root.path().join(format!("extract-{i}"));
+            std::fs::create_dir_all(&tmp).unwrap();
+            for f in [
+                "model.safetensors",
+                "tokenizer.json",
+                "config.json",
+                "modules.json",
+            ] {
+                std::fs::write(tmp.join(f), format!("from {i}")).unwrap();
+            }
+            tmps.push(tmp);
+        }
+        for tmp in &tmps {
+            promote_extracted(tmp, &final_dir).unwrap();
+        }
+        assert!(cache_is_populated(&final_dir));
+        assert_eq!(
+            std::fs::read_to_string(final_dir.join("config.json")).unwrap(),
+            "from 0",
+            "the first promotion wins; the second must not replace it"
+        );
+        assert!(
+            tmps.iter().all(|t| !t.exists()),
+            "extraction dirs left behind"
+        );
+    }
+
+    /// Extraction dirs a crashed fetch left are swept once they are a day
+    /// old; a fresh one, possibly a live fetch's, stays.
+    #[test]
+    fn stale_extraction_dirs_are_swept_and_fresh_ones_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let stale = root.path().join("potion-base-8M-v0.1.0.tmp.4242.0");
+        let fresh = root.path().join("potion-base-8M-v0.1.0.tmp.4242.1");
+        let cache = root.path().join("potion-base-8M-v0.1.0");
+        for d in [&stale, &fresh, &cache] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("config.json"), b"{}").unwrap();
+        }
+        let two_days_ago = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600),
+        );
+        filetime::set_file_mtime(&stale, two_days_ago).unwrap();
+        filetime::set_file_mtime(&cache, two_days_ago).unwrap();
+
+        sweep_stale_extract_dirs(root.path());
+        assert!(!stale.exists(), "a day-old extraction dir must be swept");
+        assert!(fresh.exists(), "a fresh one may be a live fetch's");
+        assert!(cache.exists(), "a populated cache dir is never touched");
     }
 }

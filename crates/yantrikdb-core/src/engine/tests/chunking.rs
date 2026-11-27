@@ -498,3 +498,122 @@ fn rechunk_embeds_windows_with_the_callers_embedder() {
     // Idempotent: nothing left to do.
     assert_eq!(db.rechunk_long_records_with(embed).unwrap(), (0, 0));
 }
+
+/// Concurrent backfills do the work of one: the Python binding runs
+/// rechunk with the GIL released (#271), and two overlapping runs used to
+/// both embed and write every window (ending consistent, at twice the
+/// cost). The second now waits for the first and finds nothing left.
+#[test]
+fn concurrent_rechunks_do_the_work_once() {
+    let db = YantrikDB::new(":memory:", 32).unwrap();
+    let probe = TruncatingEmbedder {
+        window: 400,
+        dim: 32,
+    };
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let embed = |text: &str| {
+        calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        probe
+            .embed(text)
+            .map_err(|e| crate::YantrikDbError::Inference(e.to_string()))
+    };
+    for i in 0..8 {
+        let text = format!("{i} {}", long_text_with_tail(TAIL));
+        let vector = probe.embed(&text).unwrap();
+        db.record(
+            &text,
+            "episodic",
+            0.5,
+            0.0,
+            604_800.0,
+            &serde_json::json!({}),
+            &vector,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+    db.detect_embedder_window_with(embed)
+        .unwrap()
+        .expect("truncation");
+
+    calls.store(0, std::sync::atomic::Ordering::Relaxed);
+    let barrier = std::sync::Barrier::new(3);
+    let results: Vec<(usize, usize)> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..3)
+            .map(|_| {
+                s.spawn(|| {
+                    barrier.wait();
+                    db.rechunk_long_records_with(embed).unwrap()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let records: usize = results.iter().map(|r| r.0).sum();
+    let vectors: usize = results.iter().map(|r| r.1).sum();
+    assert_eq!(records, 8, "{results:?}");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::Relaxed),
+        vectors,
+        "one embed per written window, none repeated: {results:?}"
+    );
+    assert_eq!(db.stats(None).unwrap().chunk_vectors as usize, vectors);
+}
+
+/// The batch backfill hands many records' windows to one `embed` call:
+/// the Python binding re-takes the GIL once per call, so per-record calls
+/// cost one GIL handoff per record beside a busy Python thread (#271).
+#[test]
+fn batch_rechunk_embeds_many_records_per_call() {
+    let db = YantrikDB::new(":memory:", 32).unwrap();
+    let probe = TruncatingEmbedder {
+        window: 400,
+        dim: 32,
+    };
+    let one = |text: &str| {
+        probe
+            .embed(text)
+            .map_err(|e| crate::YantrikDbError::Inference(e.to_string()))
+    };
+    for i in 0..8 {
+        let text = format!("{i} {}", long_text_with_tail(TAIL));
+        db.record(
+            &text,
+            "episodic",
+            0.5,
+            0.0,
+            604_800.0,
+            &serde_json::json!({}),
+            &probe.embed(&text).unwrap(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+    db.detect_embedder_window_with(one)
+        .unwrap()
+        .expect("truncation");
+
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let (records, vectors) = db
+        .rechunk_long_records_with_batch(|texts: &[&str]| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            texts.iter().map(|t| one(t)).collect()
+        })
+        .unwrap();
+    assert_eq!(records, 8);
+    assert!(vectors < 256, "the fixture must fit one group: {vectors}");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "{vectors} windows of 8 records fit one call"
+    );
+    assert_eq!(db.stats(None).unwrap().chunk_vectors as usize, vectors);
+}

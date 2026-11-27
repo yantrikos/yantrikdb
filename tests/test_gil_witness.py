@@ -328,10 +328,10 @@ def _record_in_a_thread_blocked_in_encode(db):
 
 
 def test_set_embedder_while_record_is_inside_encode(db):
-    # Before the shared snapshot, record() decided its route under one
-    # borrow and embedded under a second one held across encode(), so this
-    # set_embedder() was refused with "Already borrowed" for as long as
-    # encode() took. With the snapshot, record() holds nothing of the store
+    # Before #297, record() held the wrapper's borrow for the whole call,
+    # encode() included, so this set_embedder() was refused with
+    # "Already borrowed" for as long as encode() took. With the snapshot,
+    # record() holds nothing of the store
     # across encode(); the swap lands, the plan is remade with the new
     # embedder, and the write completes.
     emb, t, out = _record_in_a_thread_blocked_in_encode(db)
@@ -349,9 +349,9 @@ def test_close_while_record_is_inside_encode(db):
     # record() runs the Python embedder's encode() before it takes the
     # engine (the planned snapshot), so a close() landing then is the
     # exclusive close (True), and the record reports the store closed, as
-    # if close() had come first. Before, the second borrow held the
-    # wrapper across encode(): close() was refused or returned False and
-    # the record finished on that reference.
+    # if close() had come first. Before, record() held the wrapper's
+    # borrow across encode(), so close() was refused with
+    # "Already borrowed" and the record finished.
     emb, t, out = _record_in_a_thread_blocked_in_encode(db)
     try:
         assert db.close() is True

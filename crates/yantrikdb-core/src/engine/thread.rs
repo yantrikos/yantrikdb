@@ -951,7 +951,11 @@ impl crate::YantrikDB {
         // page, and the route provenance ALL read inside ONE deferred read
         // transaction: no writer can skew total vs rows vs routes.
         let conn = self.read_conn();
-        let tx = conn.unchecked_transaction()?;
+        // Deferred by name: with YANTRIKDB_READ_POOL=0, read_conn() is the
+        // write connection, whose default is IMMEDIATE (#298). A read-only
+        // snapshot must not take the write lock or wait behind a writer.
+        let tx =
+            rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Deferred)?;
 
         // Topic rids must resolve to a VISIBLE, VERIFIED TOPIC SYNTHESIS
         // row in THIS namespace — not merely a visible memory (reviewer

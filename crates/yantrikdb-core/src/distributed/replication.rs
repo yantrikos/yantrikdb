@@ -296,6 +296,10 @@ impl YantrikDB {
 /// Apply remote ops to a local YantrikDB instance. Idempotent via INSERT OR IGNORE on op_id.
 /// Returns the number of ops actually applied (newly inserted).
 pub fn apply_ops(db: &YantrikDB, ops: &[OplogEntry]) -> Result<SyncStats> {
+    // One batch at a time: the exists-check, materialization and oplog insert
+    // below are separate steps, and two overlapping callers would each apply
+    // (and count) the ops they race on.
+    let _serial = db.apply_ops_lock.lock();
     // **Item 4a single-origin ingress guard.** If an authoritative origin is
     // configured, PREFLIGHT the whole batch before any HLC merge / oplog /
     // materialization: a single foreign-origin protected write rejects the
@@ -1888,6 +1892,68 @@ mod tests {
         let r2 = apply_ops(&b, &ops).unwrap();
         assert_eq!(r2.ops_applied, 0);
         assert_eq!(r2.ops_skipped, ops.len());
+    }
+
+    /// Two threads applying the same batch must apply each op once between
+    /// them. The Python binding runs apply_ops with the GIL released (#271),
+    /// so two callers can now overlap; each checked "exists", materialized
+    /// and inserted under separate locks, and both counted the op.
+    #[test]
+    fn concurrent_apply_ops_applies_each_op_once() {
+        let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
+        for i in 0..15 {
+            a.record(
+                &format!("from A, memory {i} about alice and acme"),
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0 + i as f32, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+            a.relate(&format!("Alice{i}"), "Acme", "works_at", 1.0)
+                .unwrap();
+        }
+        let ops = extract_ops_since(&a.conn(), None, None, None, 1000).unwrap();
+
+        for trial in 0..6 {
+            let b = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            let (r1, r2) = std::thread::scope(|s| {
+                let t1 = s.spawn(|| {
+                    barrier.wait();
+                    apply_ops(&b, &ops).unwrap()
+                });
+                let t2 = s.spawn(|| {
+                    barrier.wait();
+                    apply_ops(&b, &ops).unwrap()
+                });
+                (t1.join().unwrap(), t2.join().unwrap())
+            });
+            assert_eq!(
+                r1.ops_applied + r2.ops_applied,
+                ops.len(),
+                "trial {trial}: {} + {} ops applied for a batch of {}",
+                r1.ops_applied,
+                r2.ops_applied,
+                ops.len()
+            );
+            let rows: i64 = b
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM oplog WHERE origin_actor = 'A'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(rows as usize, ops.len(), "trial {trial}: oplog rows");
+        }
     }
 
     #[test]

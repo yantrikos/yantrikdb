@@ -22,6 +22,7 @@ mod consolidate_cluster;
 mod corrections;
 mod created_at;
 mod dimensions;
+mod drafted_facts;
 mod encryption;
 // 0.13.2: 'encrypted means encrypted', verified against the raw file
 // bytes rather than against the engine's own claim.
@@ -35,16 +36,19 @@ mod event_time_recall;
 #[cfg(feature = "bundled-embedder")]
 mod explain;
 mod idempotency;
+mod index_rebuild;
 mod inspect;
 mod interactive_recall;
 #[cfg(feature = "bundled-embedder")]
 mod learned_templates;
 mod learning_categories;
+mod lock_wait;
 mod maintenance_debt;
 mod metamorphic;
 mod migrations;
 mod mobility_contest;
 mod moves;
+mod null_embedding;
 mod recall_confidence;
 mod recall_graph;
 mod reembed_router;

@@ -530,30 +530,147 @@ impl YantrikDB {
         namespace: &str,
         domain: &str,
     ) -> Result<Vec<String>> {
-        // Smaller target than the mega-blob split — auto-capture wants
-        // granular candidate facts (one thought each) for review.
-        let facts = super::split::segment_into_atomic_facts(summary, 120, 60);
-        let meta = serde_json::json!({
-            "provisional": true,
-            "kind": "session_auto_capture",
-        });
-        let mut rids = Vec::with_capacity(facts.len());
-        for fact in facts {
+        let meta = draft_metadata();
+        let mut rids = Vec::new();
+        for fact in Self::draft_facts_from_summary(summary) {
             let rid = self.record_text(
                 &fact,
-                "semantic",
-                0.5,
+                DRAFT_MEMORY_TYPE,
+                DRAFT_IMPORTANCE,
                 0.0,
-                604_800.0,
+                DRAFT_HALF_LIFE,
                 &meta,
                 namespace,
-                0.7,
+                DRAFT_CERTAINTY,
                 domain,
-                "session_auto_capture",
+                DRAFT_SOURCE,
                 None,
             )?;
             rids.push(rid);
         }
         Ok(rids)
     }
+
+    /// [`draft_memories_from_summary`] with each fact embedded by `embed`
+    /// instead of the engine's own embedder: for an embedder the engine
+    /// cannot hold (the Python binding's caller-attached one). Each fact
+    /// goes through the engine's `record_text` route with `embed` in place
+    /// of the runtime embedder, so a fact longer than the known window gets
+    /// its chunk vectors (embedded by `embed`) as it is written, and a
+    /// truncated one is counted, exactly as on the engine path. The engine
+    /// stamps no identity for these vectors.
+    ///
+    /// The route is the sync-only one: during a re-embed cutover it refuses
+    /// (`ConsolidationDeferredDuringReembed`) rather than queue a write that
+    /// the engine would later re-encode with an embedder that is not
+    /// `embed`.
+    ///
+    /// [`draft_memories_from_summary`]: Self::draft_memories_from_summary
+    pub fn draft_memories_from_summary_embedded_by<F>(
+        &self,
+        summary: &str,
+        namespace: &str,
+        domain: &str,
+        embed: F,
+    ) -> Result<Vec<String>>
+    where
+        F: Fn(&str) -> Result<Vec<f32>> + Sync,
+    {
+        let meta = draft_metadata();
+        let mut rids = Vec::new();
+        for fact in Self::draft_facts_from_summary(summary) {
+            rids.push(self.record_text_embedded_by_sync_only(
+                &fact,
+                DRAFT_MEMORY_TYPE,
+                DRAFT_IMPORTANCE,
+                0.0,
+                DRAFT_HALF_LIFE,
+                &meta,
+                namespace,
+                DRAFT_CERTAINTY,
+                domain,
+                DRAFT_SOURCE,
+                None,
+                None,
+                None,
+                None,
+                &embed,
+            )?);
+        }
+        Ok(rids)
+    }
+
+    /// The candidate facts [`draft_memories_from_summary`] records, one
+    /// thought each, in summary order.
+    ///
+    /// [`draft_memories_from_summary`]: Self::draft_memories_from_summary
+    pub fn draft_facts_from_summary(summary: &str) -> Vec<String> {
+        // Smaller target than the mega-blob split — auto-capture wants
+        // granular candidate facts (one thought each) for review.
+        super::split::segment_into_atomic_facts(summary, 120, 60)
+    }
+
+    /// Record facts from [`draft_facts_from_summary`] with vectors the
+    /// caller embedded, with the same fields [`draft_memories_from_summary`]
+    /// writes (type, importance, half-life, certainty, source and
+    /// provisional metadata). For an embedder the engine cannot reach: the
+    /// Python binding's caller-attached one. Returns the new rids in order.
+    ///
+    /// One difference: a fact longer than the embedder's known window gets
+    /// no chunk vectors here, because the engine cannot embed windows with
+    /// an embedder it cannot reach, and no write path takes caller-made
+    /// chunk vectors yet (as with `record()` and a caller vector, #274).
+    /// The engine path chunks such a fact as it writes it. A drafted fact
+    /// runs long in two ways: the splitter never cuts a sentence, so one
+    /// sentence past the 120-character target stays whole, and past 60
+    /// facts it merges the overflow into the 60th.
+    /// `rechunk_long_records_with` backfills the chunks afterwards.
+    ///
+    /// [`draft_facts_from_summary`]: Self::draft_facts_from_summary
+    /// [`draft_memories_from_summary`]: Self::draft_memories_from_summary
+    pub fn record_drafted_facts(
+        &self,
+        drafts: &[(String, Vec<f32>)],
+        namespace: &str,
+        domain: &str,
+    ) -> Result<Vec<String>> {
+        let meta = draft_metadata();
+        let mut rids = Vec::with_capacity(drafts.len());
+        for (fact, embedding) in drafts {
+            // The engine path counts a fact its embedder truncated (in
+            // record_text); a caller-made vector goes through record(),
+            // which cannot know, so count it here against the known window.
+            self.note_possible_truncation(fact.len());
+            let rid = self.record(
+                fact,
+                DRAFT_MEMORY_TYPE,
+                DRAFT_IMPORTANCE,
+                0.0,
+                DRAFT_HALF_LIFE,
+                &meta,
+                embedding,
+                namespace,
+                DRAFT_CERTAINTY,
+                domain,
+                DRAFT_SOURCE,
+                None,
+            )?;
+            rids.push(rid);
+        }
+        Ok(rids)
+    }
+}
+
+// What a drafted session memory is: one definition for both write paths.
+const DRAFT_MEMORY_TYPE: &str = "semantic";
+const DRAFT_IMPORTANCE: f64 = 0.5;
+const DRAFT_HALF_LIFE: f64 = 604_800.0;
+const DRAFT_CERTAINTY: f64 = 0.7;
+const DRAFT_SOURCE: &str = "session_auto_capture";
+
+fn draft_metadata() -> serde_json::Value {
+    serde_json::json!({
+        "provisional": true,
+        "kind": "session_auto_capture",
+    })
 }

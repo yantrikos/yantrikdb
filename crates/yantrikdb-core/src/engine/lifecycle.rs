@@ -1002,10 +1002,14 @@ impl YantrikDB {
         // a second correction records the FIRST's committed state, not a
         // stale pre-loop snapshot (sol finding 7: correct/correct).
         let conn = self.conn.lock();
+        // The write lock comes BEFORE the epoch (#298): BEGIN IMMEDIATE can
+        // wait up to busy_timeout behind another connection's writer, and a
+        // recall spinning on an odd epoch gives up after ~1M spins, so the
+        // epoch must not be odd while we wait.
+        let tx = conn.unchecked_transaction()?;
         // Correction seqlock (r4 finding 3): held across commit + cache so a
         // concurrent recall retries rather than mixing pre/post scalar state.
         let _epoch = self.enter_correction_epoch(&conn);
-        let tx = conn.unchecked_transaction()?;
 
         // Current stored (encrypted-or-plain) state = this correction's
         // prior state. Stored representation is reused directly for the
@@ -1661,6 +1665,13 @@ impl YantrikDB {
             // provide this ordering on its own).
             let conn = self.conn.lock();
 
+            // The write lock comes BEFORE the epoch (#298): BEGIN IMMEDIATE
+            // can wait up to busy_timeout behind another connection's writer,
+            // and a recall spinning on an odd epoch gives up after ~1M spins,
+            // so the epoch must not be odd while we wait. The commit closure
+            // below takes the transaction out of this slot.
+            let mut tx_slot = Some(conn.unchecked_transaction()?);
+
             // **Correction seqlock (r4 finding 3).** Enter the epoch NOW,
             // under the conn lock and before any mutation: the SQL commit +
             // vector publish + cache update below are odd-epoch; a concurrent
@@ -1704,6 +1715,7 @@ impl YantrikDB {
                 Ok(crate::vector::delta_index::ReservedAppend::Inserted) => {}
                 Ok(crate::vector::delta_index::ReservedAppend::AlreadyPresent) => {
                     drop(_epoch);
+                    drop(tx_slot);
                     drop(conn);
                     drop(sync_guard);
                     return Err(crate::error::YantrikDbError::InvalidInput(format!(
@@ -1713,6 +1725,7 @@ impl YantrikDB {
                 }
                 Err(e) => {
                     drop(_epoch);
+                    drop(tx_slot);
                     drop(conn);
                     drop(sync_guard);
                     return Err(e);
@@ -1749,6 +1762,7 @@ impl YantrikDB {
                     Ok(crate::vector::delta_index::ReservedAppend::AlreadyPresent) => {
                         drop(reservation);
                         drop(_epoch);
+                        drop(tx_slot);
                         drop(conn);
                         drop(sync_guard);
                         return Err(crate::error::YantrikDbError::InvalidInput(format!(
@@ -1759,6 +1773,7 @@ impl YantrikDB {
                     Err(e) => {
                         drop(reservation);
                         drop(_epoch);
+                        drop(tx_slot);
                         drop(conn);
                         drop(sync_guard);
                         return Err(e);
@@ -1780,7 +1795,9 @@ impl YantrikDB {
             let mut invalidated_syntheses: Vec<String> = Vec::new();
             let commit_result: Result<i64> =
                 (|| {
-                    let tx = conn.unchecked_transaction()?;
+                    let tx = tx_slot
+                        .take()
+                        .expect("the correction's transaction is opened above");
 
                     // True current state = this correction's prior state.
                     // **Review finding 6.** Revalidate active status HERE, under
@@ -2046,6 +2063,7 @@ impl YantrikDB {
                     // seal), so the removal always succeeds.
                     drop(reservation);
                     drop(_epoch);
+                    drop(tx_slot);
                     drop(conn);
                     drop(sync_guard);
                     return Err(e);
@@ -2115,6 +2133,7 @@ impl YantrikDB {
             // Epoch guard (borrows conn) drops BEFORE conn — even epoch is
             // restored while this correction still holds conn (sol r5 #1).
             drop(_epoch);
+            drop(tx_slot);
             drop(conn);
             drop(sync_guard);
 
@@ -2271,6 +2290,10 @@ impl YantrikDB {
             }
             let generation = state.generation as i64;
             let conn = self.conn.lock();
+            // Write lock BEFORE the epoch (#298), as on the leader's path:
+            // BEGIN IMMEDIATE may wait busy_timeout, and the epoch must not be
+            // odd while it does. The commit closure takes it from the slot.
+            let mut tx_slot = Some(conn.unchecked_transaction()?);
             // Correction seqlock (r4 finding 3): a follower-applied correction
             // is odd-epoch across its commit + publish + cache, so a
             // concurrent local recall retries rather than pairing new text
@@ -2427,7 +2450,9 @@ impl YantrikDB {
             let mut old_chunk_idxs: Vec<i64> = Vec::new();
             let mut invalidated_syntheses: Vec<String> = Vec::new();
             let commit: Result<()> = (|| {
-                let tx = conn.unchecked_transaction()?;
+                let tx = tx_slot
+                    .take()
+                    .expect("the correction's transaction is opened above");
                 tx.execute(
                     "INSERT OR IGNORE INTO record_revisions \
                      (revision_id, rid, revision_num, prior_text, prior_metadata, \
@@ -2585,6 +2610,7 @@ impl YantrikDB {
             // to the in-memory graph_index on the follower too (nuron), so a
             // follower's graph expansion stays coherent with the corrected text.
             drop(_epoch);
+            drop(tx_slot);
             drop(conn);
             if let Err(e) = self.resync_memory_graph_links_after_correction(rid) {
                 tracing::warn!(
