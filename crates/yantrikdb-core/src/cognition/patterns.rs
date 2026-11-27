@@ -338,10 +338,17 @@ fn mine_topic_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
                 stored_meta,
                 namespace,
             )| {
-                let text = db.decrypt_text(&stored_text)?;
-                let meta_str = db.decrypt_text(&stored_meta)?;
-                let emb_blob = db.decrypt_embedding(&stored_emb)?;
-                Ok(MemoryWithEmbedding {
+                // A record whose ciphertext cannot be read must not abort
+                // the whole mining pass — the same policy `entity_label`
+                // uses. Skip this row and keep mining the rest.
+                let (Ok(text), Ok(meta_str), Ok(emb_blob)) = (
+                    db.decrypt_text(&stored_text),
+                    db.decrypt_text(&stored_meta),
+                    db.decrypt_embedding(&stored_emb),
+                ) else {
+                    return Ok(None);
+                };
+                Ok(Some(MemoryWithEmbedding {
                     rid,
                     memory_type,
                     text,
@@ -354,10 +361,15 @@ fn mine_topic_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
                     metadata: serde_json::from_str(&meta_str)
                         .unwrap_or(serde_json::Value::Object(Default::default())),
                     namespace,
-                })
+                }))
             },
         )
-        .collect::<Result<Vec<_>>>()?;
+        // `Ok(None)` marks a row whose ciphertext we could not read; drop it
+        // and mine the rest instead of failing the pass.
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     if memories.len() < 5 {
         return Ok(vec![]);
@@ -1348,6 +1360,119 @@ mod tests {
         assert!(
             !label.contains(&stored[..8.min(stored.len())]),
             "the label must never print ciphertext, got {label:?}"
+        );
+    }
+
+    #[test]
+    fn test_mining_pass_survives_an_undecryptable_record() {
+        // HF-05: `entity_label` falls back on a decryption failure, but the
+        // public pass used to abort in `mine_topic_clusters`, which
+        // `?`-propagated the same error. One unreadable row must not kill the
+        // whole run.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enc2.db");
+        let mut key = [0u8; 32];
+        key[0] = 9;
+        let db = YantrikDB::new_encrypted(path.to_str().unwrap(), 8, &key).unwrap();
+        let mut rids = Vec::new();
+        for i in 0..6 {
+            let body = format!("Signing key rotation note {i} for the gateway.");
+            rids.push(
+                db.record(
+                    &body,
+                    "episodic",
+                    0.5,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &vec_seed(1500.0 + i as f32, 8),
+                    "default",
+                    0.8,
+                    "general",
+                    "user",
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        db.conn()
+            .execute(
+                "UPDATE memories SET text = '!!!not-base64!!!' WHERE rid = ?1",
+                params![rids[0]],
+            )
+            .unwrap();
+        assert!(
+            db.decrypt_text("!!!not-base64!!!").is_err(),
+            "fixture check: this payload must really fail to decrypt"
+        );
+
+        let res = mine_patterns(&db, &PatternConfig::default());
+        assert!(
+            res.is_ok(),
+            "one unreadable record must not abort the pass: {res:?}"
+        );
+
+        for p in get_patterns(&db, None, None, 200).unwrap() {
+            assert!(
+                !p.description.contains("not-base64"),
+                "ciphertext must never reach a description: {:?}",
+                p.description
+            );
+        }
+    }
+
+    #[test]
+    fn test_persisted_description_is_corrected_after_forget_and_remine() {
+        // HF-06: the maintainer's case — a description that already quotes a
+        // record, the record is forgotten, and the same row is re-mined.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let secret = "The api key rotates every ninety days.";
+        let rid = db
+            .record(
+                secret,
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &vec_seed(1600.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        // Three shared neighbours so co_occurrence fires between the record
+        // and a plain name.
+        for t in ["Hub A", "Hub B", "Hub C"] {
+            db.relate(&rid, t, "related_to", 1.0).unwrap();
+            db.relate("Partner", t, "related_to", 1.0).unwrap();
+        }
+
+        let _ = mine_patterns(&db, &PatternConfig::default()).unwrap();
+        let before = get_patterns(&db, Some("co_occurrence"), None, 50).unwrap();
+        let row = before
+            .iter()
+            .find(|p| p.description.contains("api key rotates"))
+            .expect("the first mine must quote the record's text");
+        let pid = row.pattern_id.clone();
+
+        db.forget(&rid).unwrap();
+        let _ = mine_patterns(&db, &PatternConfig::default()).unwrap();
+
+        let after = get_patterns(&db, Some("co_occurrence"), None, 50).unwrap();
+        let same: Vec<_> = after.iter().filter(|p| p.pattern_id == pid).collect();
+        assert_eq!(same.len(), 1, "the re-mine must not duplicate the row");
+        assert!(
+            !same[0].description.contains("api key rotates"),
+            "the stale description must be corrected, got {:?}",
+            same[0].description
+        );
+        assert!(
+            same[0].description.contains(&rid),
+            "the corrected label falls back to the rid, got {:?}",
+            same[0].description
         );
     }
 
