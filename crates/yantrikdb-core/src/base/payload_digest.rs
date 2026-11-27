@@ -103,10 +103,10 @@ pub enum PayloadVariant {
     /// `record_text()` — engine embeds the text; the generated vector is excluded.
     RecordText,
     /// A write made by `commit_consolidation` (a synthesis, or a summary with a
-    /// caller key). Its `half_life` is DERIVED from the sources' *current*
-    /// values (`max(sources) * 1.5`), and a plain `recall` reinforces those by
-    /// 1.2 — so the derived value would make an honest retry look like a
-    /// different payload. It is therefore not fed into the digest (#330, the
+    /// caller key). Its `importance`, `valence` and `half_life` are DERIVED from
+    /// the sources' *current* state — and a plain `recall` reinforces half_life,
+    /// recalibration rewrites importance — so those values would make an honest
+    /// retry look like a different payload. None of the three is fed (#330, the
     /// same class of defect #293 fixed for `consolidation_time`).
     Consolidation,
 }
@@ -344,11 +344,15 @@ pub fn payload_digest(v: &PayloadView<'_>) -> [u8; 32] {
     feed_str(&mut h, v.namespace);
     feed_str(&mut h, v.text);
     feed_str(&mut h, v.memory_type);
-    feed_f64(&mut h, v.importance);
-    feed_f64(&mut h, v.valence);
-    // #330: a consolidation's half_life is derived from the sources' current
-    // state, and reading them moves it. It must not decide idempotency.
+    // #330: a consolidation derives importance, valence and half_life from its
+    // sources' CURRENT state — `(max(importance) * 1.1).min(1.0)`, the mean
+    // valence, `max(half_life) * 1.5` — and reading or recalibrating the sources
+    // moves all three. Feeding any of them would make an honest retry look like
+    // a different payload. They are left out for `Consolidation` only; on
+    // `record()`/`record_text()` they are caller arguments and stay in.
     if !matches!(v.variant, PayloadVariant::Consolidation) {
+        feed_f64(&mut h, v.importance);
+        feed_f64(&mut h, v.valence);
         feed_f64(&mut h, v.half_life);
     }
     feed_f64(&mut h, v.certainty);

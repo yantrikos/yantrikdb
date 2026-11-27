@@ -383,6 +383,182 @@ fn summary_replay_survives_a_recall_that_does_not_reinforce() {
     assert_eq!(second["consolidated_rid"], first["consolidated_rid"]);
 }
 
+/// #330, test 1 of the three the maintainer asked for: a claim written before
+/// this change must conflict **with its original rid**, write nothing, and leave
+/// the stored digest alone. The caller then uses that rid — minting a fresh key
+/// for the same evidence would create a second logical item.
+#[test]
+fn a_legacy_claim_conflicts_with_its_original_rid_and_writes_nothing() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rids = seed(&db, &["delta one", "delta two"]);
+    let first = synthesis(&db, &rids, SYNTH_TEXT, "k-legacy").unwrap();
+    let first_rid = first["consolidated_rid"].as_str().unwrap().to_string();
+
+    // A legacy digest is one this code cannot reproduce: plant a byte-different
+    // value in the claim row, which is what a pre-fix write leaves behind.
+    let mut planted: Vec<u8> = db
+        .conn()
+        .query_row(
+            "SELECT payload_digest FROM idempotency_claims WHERE idempotency_key LIKE 'k-legacy%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    planted[7] ^= 0xff;
+    db.conn()
+        .execute(
+            "UPDATE idempotency_claims SET payload_digest = ?1 WHERE idempotency_key LIKE 'k-legacy%'",
+            rusqlite::params![planted],
+        )
+        .unwrap();
+
+    let before: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+        .unwrap();
+    let err =
+        synthesis(&db, &rids, SYNTH_TEXT, "k-legacy").expect_err("a legacy digest must conflict");
+    match err {
+        crate::error::YantrikDbError::IdempotencyConflict { existing_rid, .. } => {
+            assert_eq!(
+                existing_rid, first_rid,
+                "the conflict names the original rid"
+            );
+        }
+        other => panic!("expected IdempotencyConflict, got {other:?}"),
+    }
+
+    let after: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(after, before, "a conflict must not write a record");
+    let still: Vec<u8> = db
+        .conn()
+        .query_row(
+            "SELECT payload_digest FROM idempotency_claims WHERE idempotency_key LIKE 'k-legacy%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(still, planted, "a conflict must not rewrite the claim");
+    let generations: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE synthesis_logical_key = 'k-legacy'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(generations, 1, "no new generation from a conflict");
+}
+
+/// #330, test 2: after such a conflict, **changed evidence** under the same
+/// logical key is a different derived key, so it writes a new generation and
+/// retires the old one. The conflict does not lock the logical key.
+#[test]
+fn after_a_legacy_conflict_changed_evidence_still_supersedes_the_old_generation() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rids = seed(&db, &["epsilon one", "epsilon two"]);
+    let first = synthesis(&db, &rids, SYNTH_TEXT, "k-legacy-gen").unwrap();
+    let first_rid = first["consolidated_rid"].as_str().unwrap().to_string();
+
+    let mut planted: Vec<u8> = db
+        .conn()
+        .query_row(
+            "SELECT payload_digest FROM idempotency_claims WHERE idempotency_key LIKE 'k-legacy-gen%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    planted[3] ^= 0xff;
+    db.conn()
+        .execute(
+            "UPDATE idempotency_claims SET payload_digest = ?1 WHERE idempotency_key LIKE 'k-legacy-gen%'",
+            rusqlite::params![planted],
+        )
+        .unwrap();
+    let _ = synthesis(&db, &rids, SYNTH_TEXT, "k-legacy-gen").expect_err("legacy conflict first");
+
+    // Changed evidence: a third source joins the cluster.
+    let mut wider = rids.clone();
+    wider.push(
+        db.record(
+            "epsilon three",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(4.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap(),
+    );
+    let second = synthesis(&db, &wider, SYNTH_TEXT, "k-legacy-gen")
+        .expect("changed evidence is a new generation, not a conflict");
+    assert_ne!(
+        second["consolidated_rid"].as_str().unwrap(),
+        first_rid,
+        "a new generation is a new record"
+    );
+
+    let old_state: Option<String> = db
+        .conn()
+        .query_row(
+            "SELECT synthesis_state FROM memories WHERE rid = ?1",
+            rusqlite::params![first_rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_state.as_deref(), Some("superseded"));
+    let verified: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE synthesis_logical_key = 'k-legacy-gen' \
+             AND synthesis_state = 'verified'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(verified, 1, "exactly one generation stays current");
+}
+
+/// #330, test 3: importance is derived like the others — recalibration rewrites
+/// a source's importance in place, and that must not break the replay either.
+#[test]
+fn a_source_importance_change_does_not_prevent_the_replay() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rids = seed(&db, &["zeta one", "zeta two"]);
+    let first = synthesis(&db, &rids, SYNTH_TEXT, "k-importance").unwrap();
+
+    // Importance recalibration rewrites the stored value in place; this is the
+    // input the digest used to consume.
+    let before: f64 = db
+        .conn()
+        .query_row(
+            "SELECT importance FROM memories WHERE rid = ?1",
+            rusqlite::params![rids[0]],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.conn()
+        .execute(
+            "UPDATE memories SET importance = ?1 WHERE rid = ?2",
+            rusqlite::params![(before + 0.25).min(1.0), rids[0]],
+        )
+        .unwrap();
+
+    let second = synthesis(&db, &rids, SYNTH_TEXT, "k-importance")
+        .expect("a source-importance change must not break the replay");
+    assert_eq!(second["idempotent_replay"], true);
+    assert_eq!(second["consolidated_rid"], first["consolidated_rid"]);
+}
+
 #[test]
 fn summary_refuses_a_changed_text_after_a_recall() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
