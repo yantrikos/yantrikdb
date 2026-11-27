@@ -204,3 +204,107 @@ fn the_cluster_applier_applies_the_same_endpoint_rule() {
     assert_eq!(gi.entity_count(), 0, "a replay minted a graph node");
     assert_eq!(gi.edge_count(), 0);
 }
+
+#[test]
+fn a_backfill_does_not_relink_a_planted_rid_entity() {
+    // Review PR322A-02: `backfill_memory_entities` scanned `entities` with no
+    // admission filter, so a rid row that the load-time suppression leaves in
+    // place (by design, non-destructive) regained a `memory_entities` link on
+    // the next maintenance or replication pass — undoing the heal.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // The rid must appear IN the text, or the backfill would never match it
+    // and the test would pass with or without the guard.
+    let body = format!("Log entry tied to record {LOWER} during the sweep.");
+    let memory = db
+        .record(
+            &body,
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &vec![0.1f32; 8],
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    // Plant the rid ENTITY ROW only — no `memory_entities` link, no claim. That
+    // is the state the load-time suppression leaves behind, and the state the
+    // backfill used to re-link.
+    db.conn()
+        .execute(
+            "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+             VALUES (?1, 'tech', 1.0, 1.0, 1)",
+            rusqlite::params![LOWER],
+        )
+        .unwrap();
+    assert_eq!(
+        link_rows(&db, LOWER),
+        0,
+        "fixture: no link before the backfill"
+    );
+
+    db.backfill_memory_entities().unwrap();
+
+    assert_eq!(
+        link_rows(&db, LOWER),
+        0,
+        "a backfill must not create a memory_entities link for a record id"
+    );
+}
+
+#[test]
+fn ingest_claim_with_a_rid_endpoint_mints_no_index_node_or_edge() {
+    // Review PR322A-01: `ingest_claim` is the documented primary claim write
+    // path. Its SQL side skipped a UUID endpoint (admit_entity rejects it),
+    // but its graph-index side added the node and the hop unconditionally —
+    // exactly what `relate()` was changed not to do.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let memory = db
+        .record(
+            "Alice Moreau signed the supply agreement.",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &vec![0.2f32; 8],
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    db.ingest_claim(
+        LOWER,
+        "related_to",
+        "Alice Moreau",
+        "default",
+        1,
+        "asserted",
+        None,
+        None,
+        "manual",
+        None,
+        "high",
+        Some(&memory),
+        None,
+        None,
+        1.0,
+    )
+    .unwrap();
+
+    assert_eq!(entity_rows(&db, LOWER), 0, "no entity row for a record id");
+    let gi = db.graph_index.read();
+    assert!(
+        !gi.all_entity_names().iter().any(|n| n == LOWER),
+        "no graph node for a record id"
+    );
+    assert_eq!(gi.edge_count(), 0, "no hop through a record id");
+}

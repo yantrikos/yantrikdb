@@ -722,7 +722,7 @@ impl YantrikDB {
     /// Returns the number of links created. Idempotent (uses INSERT OR IGNORE).
     pub fn backfill_memory_entities(&self) -> Result<usize> {
         // Phase 1: Lock conn, query entities and memories, drop conn
-        let entities: Vec<String>;
+        let mut entities: Vec<String>;
         let raw_memories: Vec<(String, String)>;
 
         {
@@ -731,6 +731,10 @@ impl YantrikDB {
                 .prepare("SELECT name FROM entities")?
                 .query_map([], |row| row.get(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            // A rid entity row may still exist (the load-time suppression is
+            // non-destructive by design). Re-linking it here would undo that
+            // heal on the next maintenance or replication pass.
+            entities.retain(|n| !crate::knowledge::graph::is_uuid_shaped(n));
 
             if entities.is_empty() {
                 return Ok(0);
@@ -1043,10 +1047,22 @@ impl YantrikDB {
 
         // Phase 2: graph_index update
         {
+            // The SQL side above skips entity rows for a UUID-shaped endpoint
+            // because `admit_entity` rejects them. The index must agree, or a
+            // claim written here mints the very node and hop that `relate()`
+            // was changed not to create: a graph node with no entity row.
+            let src_is_id = crate::knowledge::graph::is_uuid_shaped(&src_resolved);
+            let dst_is_id = crate::knowledge::graph::is_uuid_shaped(&dst_resolved);
             let mut gi = self.graph_index.write();
-            gi.add_entity(&src_resolved, src_type);
-            gi.add_entity(&dst_resolved, dst_type);
-            gi.add_edge(&src_resolved, &dst_resolved, weight as f32);
+            if !src_is_id {
+                gi.add_entity(&src_resolved, src_type);
+            }
+            if !dst_is_id {
+                gi.add_entity(&dst_resolved, dst_type);
+            }
+            if !src_is_id && !dst_is_id {
+                gi.add_edge(&src_resolved, &dst_resolved, weight as f32);
+            }
         }
 
         // Phase 3: backfill memory_entities for newly-created entities
