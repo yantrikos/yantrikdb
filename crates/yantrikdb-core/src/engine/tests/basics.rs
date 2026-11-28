@@ -1759,3 +1759,97 @@ fn resolve_survives_a_refused_edge_that_would_close_a_cycle() {
         .unwrap();
     assert_eq!(status, "resolved");
 }
+
+/// The chain walk has a cap. When it hits, the gate refuses the edge with
+/// `ChainTraversalLimit` — the resolution must still happen. This is its own
+/// case: the walk gives up on depth, not on a conflict or a cycle.
+#[test]
+fn resolve_survives_a_chain_that_hits_the_traversal_cap() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let a = db
+        .record(
+            "value is nine",
+            "semantic",
+            0.8,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let b = db
+        .record(
+            "value is ten",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    // A supersedes chain leaving the loser, longer than CHAIN_WALK_CAP.
+    {
+        let conn = db.conn();
+        let mut prev = b.clone();
+        for i in 0..(crate::engine::links::CHAIN_WALK_CAP + 5) {
+            let next = format!("chain-{i:05}");
+            conn.execute(
+                "INSERT INTO record_links (link_id, source_rid, target_rid, link_type, \
+                 status, selection_state, created_at, hlc, origin_actor) \
+                 VALUES (?1, ?2, ?3, 'supersedes', 'active', 'selected', 1.0, x'00', 'test')",
+                rusqlite::params![format!("edge-{i:05}"), prev, next],
+            )
+            .unwrap();
+            prev = next;
+        }
+    }
+
+    let conflict = crate::conflict::create_conflict(
+        &db,
+        &crate::types::ConflictType::IdentityFact,
+        &a,
+        &b,
+        Some("value"),
+        Some("digits"),
+        "conflicting digits",
+    )
+    .unwrap();
+
+    let out = db.resolve_conflict(
+        &conflict.conflict_id,
+        "keep_a",
+        Some(&a),
+        None,
+        Some("nine"),
+    );
+    assert!(
+        out.is_ok(),
+        "a chain that hits the walk cap must not block the resolution: {:?}",
+        out.err()
+    );
+    let status: String = db
+        .conn()
+        .query_row(
+            "SELECT status FROM conflicts WHERE conflict_id = ?1",
+            [conflict.conflict_id.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "resolved");
+    let edges = db
+        .linked_records(&a, crate::types::LinkDirection::Outbound, None)
+        .unwrap();
+    assert!(edges.is_empty(), "the refused edge must not exist");
+}

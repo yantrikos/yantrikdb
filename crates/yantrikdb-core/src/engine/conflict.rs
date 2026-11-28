@@ -562,7 +562,7 @@ impl YantrikDB {
     /// `conflicts` row already records. `link()` runs the supersedes gate, which
     /// legitimately refuses an edge when the target already has a selected
     /// successor, when the edge would close a chain, or when the endpoints are
-    /// in different namespaces or already tombstoned. On `main` those conflicts
+    /// in different namespaces or already tombstoned, or when the chain walk hits its cap. On `main` those conflicts
     /// resolve; they must keep resolving.
     ///
     /// Only the gate's own refusals are absorbed. Anything else — a database
@@ -580,6 +580,7 @@ impl YantrikDB {
             Err(
                 e @ (YantrikDbError::SupersedeConflict { .. }
                 | YantrikDbError::SupersedeCycle { .. }
+                | YantrikDbError::ChainTraversalLimit { .. }
                 | YantrikDbError::InvalidLinkEndpoints { .. }),
             ) => {
                 tracing::warn!(
