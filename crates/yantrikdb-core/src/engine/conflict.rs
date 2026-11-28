@@ -556,6 +556,44 @@ impl YantrikDB {
         Ok(report)
     }
 
+    /// Best-effort provenance for a resolution.
+    ///
+    /// The edge is an audit trail; it must not be able to veto the decision the
+    /// `conflicts` row already records. `link()` runs the supersedes gate, which
+    /// legitimately refuses an edge when the target already has a selected
+    /// successor, when the edge would close a chain, or when the endpoints are
+    /// in different namespaces or already tombstoned. On `main` those conflicts
+    /// resolve; they must keep resolving.
+    ///
+    /// Only the gate's own refusals are absorbed. Anything else — a database
+    /// error, a lock, a corrupt row — propagates, because swallowing that would
+    /// turn a broken store into a silent "no provenance".
+    fn link_provenance(&self, source: &str, target: &str, link_type: LinkType) -> Result<()> {
+        match self.link(
+            source,
+            &RecordLink {
+                target_rid: target.to_string(),
+                link_type,
+            },
+        ) {
+            Ok(_) => Ok(()),
+            Err(
+                e @ (YantrikDbError::SupersedeConflict { .. }
+                | YantrikDbError::SupersedeCycle { .. }
+                | YantrikDbError::InvalidLinkEndpoints { .. }),
+            ) => {
+                tracing::warn!(
+                    target: "yantrikdb::conflict",
+                    source,
+                    target_rid = target,
+                    "provenance edge refused by the supersedes gate; the resolution stands ({e})"
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Resolve a conflict with a chosen strategy.
     ///
     /// Strategies:
@@ -617,13 +655,7 @@ impl YantrikDB {
                 // `record_links` exists for: `forget` marks the edge
                 // broken_target_forgotten instead of deleting it, so the audit
                 // trail survives while the edge leaves the active view.
-                self.link(
-                    winner,
-                    &RecordLink {
-                        target_rid: loser.to_string(),
-                        link_type: LinkType::Supersedes,
-                    },
-                )?;
+                self.link_provenance(winner, loser, LinkType::Supersedes)?;
                 self.forget(loser)?;
                 loser_tombstoned = true;
                 (Some(winner.to_string()), Some(loser.to_string()))
@@ -640,13 +672,7 @@ impl YantrikDB {
                 // `record_links` exists for: `forget` marks the edge
                 // broken_target_forgotten instead of deleting it, so the audit
                 // trail survives while the edge leaves the active view.
-                self.link(
-                    winner,
-                    &RecordLink {
-                        target_rid: loser.to_string(),
-                        link_type: LinkType::Supersedes,
-                    },
-                )?;
+                self.link_provenance(winner, loser, LinkType::Supersedes)?;
                 self.forget(loser)?;
                 loser_tombstoned = true;
                 (Some(winner.to_string()), Some(loser.to_string()))
@@ -693,13 +719,7 @@ impl YantrikDB {
                 // merged record is built from both sources and claims no
                 // "newer is better" over them.
                 for source in [&conflict.memory_a, &conflict.memory_b] {
-                    self.link(
-                        &rid,
-                        &RecordLink {
-                            target_rid: source.to_string(),
-                            link_type: LinkType::DerivedFrom,
-                        },
-                    )?;
+                    self.link_provenance(&rid, source, LinkType::DerivedFrom)?;
                 }
 
                 self.forget(&conflict.memory_a)?;
