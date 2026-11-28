@@ -647,7 +647,17 @@ impl YantrikDB {
                     .as_ref()
                     .map(|m| m.namespace.as_str())
                     .unwrap_or("default");
-                let rid = self.record(
+                // A merge must create the record ONCE. The record and the two
+                // tombstones are separate commits and the `conflicts` row is
+                // written last, so an interrupted merge leaves the conflict open
+                // and the next run would write a second record; two writers
+                // entering together pass the "already resolved" guard and do the
+                // same. Both are measured. A lookup before `record()` does not
+                // close the second case (check-then-act); the store's idempotency
+                // claim does, because it is committed WITH the record and
+                // ON CONFLICT DO NOTHING keys it on the conflict id.
+                let merge_key = format!("merge:{conflict_id}");
+                let rid = self.record_with_idempotency(
                     text,
                     "semantic",
                     merged_importance,
@@ -659,6 +669,8 @@ impl YantrikDB {
                     0.8,
                     "general",
                     "user",
+                    None,
+                    Some(&merge_key),
                     None,
                 )?;
                 new_memory_rid = Some(rid.clone());

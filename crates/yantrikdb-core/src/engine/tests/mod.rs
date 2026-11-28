@@ -18,6 +18,7 @@ mod chunking;
 #[cfg(feature = "bundled-embedder")]
 mod claim_chain_gate;
 mod cognition_gates;
+mod merge_idempotency;
 mod consolidate_cluster;
 mod corrections;
 mod created_at;
