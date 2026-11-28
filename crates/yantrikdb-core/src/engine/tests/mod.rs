@@ -24,6 +24,7 @@ mod created_at;
 mod dimensions;
 mod drafted_facts;
 mod encryption;
+mod merge_idempotency;
 // 0.13.2: 'encrypted means encrypted', verified against the raw file
 // bytes rather than against the engine's own claim.
 #[cfg(feature = "bundled-embedder")]
