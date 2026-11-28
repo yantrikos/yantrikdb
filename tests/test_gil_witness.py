@@ -602,6 +602,7 @@ RELEASES = {
     "link": lambda db, c: db.link(c["rid"], c["rid2"], "supports"),
     "unlink": lambda db, c: db.unlink(c["rid"], c["rid2"], "supports"),
     "linked_records": lambda db, c: db.linked_records(c["rid"]),
+    "broken_links": lambda db, c: db.broken_links(c["rid"], "both"),
     "recall_with_links": lambda db, c: db.recall_with_links(query="topic 3"),
     "reify_supersedes_links": lambda db, c: db.reify_supersedes_links(),
     "audit_leak_candidates": lambda db, c: db.audit_leak_candidates(),

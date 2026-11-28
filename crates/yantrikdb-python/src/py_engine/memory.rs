@@ -1188,6 +1188,42 @@ impl PyYantrikDB {
             .collect()
     }
 
+    /// Provenance edges whose target was forgotten (`status != 'active'`).
+    ///
+    /// `linked_records` only ever returns active edges, so before this the
+    /// reason a superseded record disappeared was readable in `record_links`
+    /// and unreachable through the binding. Deliberately a separate method:
+    /// the active view is what ranking and expansion consume and must not
+    /// change because provenance became readable.
+    fn broken_links(slf: &Bound<'_, Self>, rid: &str, direction: &str) -> PyResult<Vec<PyObject>> {
+        // Closed is reported before any argument error, as before the GIL
+        // sweep (#271).
+        let db = Self::engine_handle(slf)?;
+        let py = slf.py();
+        let dir = match direction {
+            "outbound" => yantrikdb_core::LinkDirection::Outbound,
+            "inbound" => yantrikdb_core::LinkDirection::Inbound,
+            "both" => yantrikdb_core::LinkDirection::Both,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "broken_links: invalid direction {other:?}; expected \
+                     \"outbound\" | \"inbound\" | \"both\""
+                )))
+            }
+        };
+        let out = run_detached(slf.py(), db, |db| db.broken_links(rid, dir))?;
+        out.iter()
+            .map(|l| {
+                let d = PyDict::new(py);
+                d.set_item("rid", &l.rid)?;
+                d.set_item("link_type", &l.link_type)?;
+                d.set_item("created_at", l.created_at)?;
+                d.set_item("direction", &l.direction)?;
+                d.set_item("status", &l.status)?;
+                Ok::<PyObject, pyo3::PyErr>(d.into())
+            })
+            .collect()
+    }
     /// Recall with record-link expansion. `expand_links` is the hop budget
     /// (0 = identical to recall()). Mirrors `recall()` args otherwise.
     #[pyo3(signature = (query=None, query_embedding=None, top_k=10, expand_links=1, time_window=None, memory_type=None, include_consolidated=false, expand_entities=false, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None))]

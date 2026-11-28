@@ -1178,6 +1178,23 @@ pub struct LinkedRecord {
     pub direction: String,
 }
 
+/// An edge whose target was forgotten — the read side of `broken_links()`.
+///
+/// A separate type rather than a `status` field on [`LinkedRecord`]: the active
+/// view is what ranking and expansion consume, and its shape must not change
+/// because provenance became readable. This one exists to carry the reason.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokenLink {
+    /// The other endpoint, relative to the queried rid.
+    pub rid: String,
+    pub link_type: String,
+    pub created_at: f64,
+    /// "outbound" or "inbound" relative to the queried rid.
+    pub direction: String,
+    /// Why the edge left the active view: `broken_target_forgotten`, …
+    pub status: String,
+}
+
 /// Per-link outcome from `record_with_links_partial` (issue #48). The
 /// record always commits first (durable via the oplog); each link is
 /// then attempted independently — a `Failed` on one does not abort the

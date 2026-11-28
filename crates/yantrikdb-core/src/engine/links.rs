@@ -82,8 +82,8 @@ impl ChainAuditReport {
     }
 }
 use crate::types::{
-    LinkDirection, LinkResult, LinkType, LinkedRecord, RecallResult, RecordLink, ScoreBreakdown,
-    ScoreContributions,
+    BrokenLink, LinkDirection, LinkResult, LinkType, LinkedRecord, RecallResult, RecordLink,
+    ScoreBreakdown, ScoreContributions,
 };
 
 use super::{now, YantrikDB};
@@ -1133,6 +1133,61 @@ impl YantrikDB {
             }
         }
 
+        Ok(out)
+    }
+
+    /// Provenance edges whose target was forgotten.
+    ///
+    /// `forget` marks an edge `broken_target_forgotten` instead of deleting it,
+    /// exactly so the reason survives — but every read path filters
+    /// `status = 'active'`, so until now such an edge was write-only: present in
+    /// `record_links`, unreachable through any API. This is the read side.
+    ///
+    /// Deliberately a separate method rather than a flag on `linked_records`:
+    /// the active view is what ranking and expansion consume, and it must not
+    /// change because provenance became readable.
+    pub fn broken_links(&self, rid: &str, direction: LinkDirection) -> Result<Vec<BrokenLink>> {
+        let mut out: Vec<BrokenLink> = Vec::new();
+        // A read: through the pool, so it does not queue behind writers.
+        let conn = self.read_conn();
+        if matches!(direction, LinkDirection::Outbound | LinkDirection::Both) {
+            let mut stmt = conn.prepare(
+                "SELECT target_rid, link_type, created_at, status FROM record_links \
+                 WHERE source_rid = ?1 AND status != 'active' \
+                 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt.query_map(params![rid], |row| {
+                Ok(BrokenLink {
+                    rid: row.get::<_, String>(0)?,
+                    link_type: row.get::<_, String>(1)?,
+                    created_at: row.get::<_, f64>(2)?,
+                    direction: "outbound".to_string(),
+                    status: row.get::<_, String>(3)?,
+                })
+            })?;
+            for r in rows {
+                out.push(r?);
+            }
+        }
+        if matches!(direction, LinkDirection::Inbound | LinkDirection::Both) {
+            let mut stmt = conn.prepare(
+                "SELECT source_rid, link_type, created_at, status FROM record_links \
+                 WHERE target_rid = ?1 AND status != 'active' \
+                 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt.query_map(params![rid], |row| {
+                Ok(BrokenLink {
+                    rid: row.get::<_, String>(0)?,
+                    link_type: row.get::<_, String>(1)?,
+                    created_at: row.get::<_, f64>(2)?,
+                    direction: "inbound".to_string(),
+                    status: row.get::<_, String>(3)?,
+                })
+            })?;
+            for r in rows {
+                out.push(r?);
+            }
+        }
         Ok(out)
     }
 }

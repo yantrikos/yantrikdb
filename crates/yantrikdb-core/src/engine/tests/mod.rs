@@ -13,6 +13,7 @@ mod backpressure_lifecycle;
 mod basics;
 #[cfg(feature = "bundled-embedder")]
 mod bound_extraction;
+mod broken_links;
 mod bundled_embedder;
 mod chunking;
 #[cfg(feature = "bundled-embedder")]
