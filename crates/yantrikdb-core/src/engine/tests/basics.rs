@@ -1418,3 +1418,163 @@ fn test_stats_include_conflicts() {
     assert_eq!(s.open_conflicts, 1);
     assert_eq!(s.resolved_conflicts, 0);
 }
+
+
+/// The resolution decides that one record beats the other. That decision has to
+/// survive as an edge: without it the only trace of the loser is a tombstone in
+/// `memories` and a summary line in `conflicts`, and nothing a caller can walk.
+#[test]
+fn test_resolve_keep_a_records_supersedes_link() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid_a = db
+        .record(
+            "birthday March 5",
+            "episodic",
+            0.9,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let rid_b = db
+        .record(
+            "birthday March 15",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let conflict = crate::conflict::create_conflict(
+        &db,
+        &crate::types::ConflictType::IdentityFact,
+        &rid_a,
+        &rid_b,
+        Some("User"),
+        Some("birthday"),
+        "conflicting birthdays",
+    )
+    .unwrap();
+
+    db.resolve_conflict(
+        &conflict.conflict_id,
+        "keep_a",
+        Some(&rid_a),
+        None,
+        Some("User confirmed March 5"),
+    )
+    .unwrap();
+
+    let conn = db.conn();
+    let (link_type, status): (String, String) = conn
+        .query_row(
+            "SELECT link_type, status FROM record_links \
+             WHERE source_rid = ?1 AND target_rid = ?2",
+            [rid_a.as_str(), rid_b.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("the resolution must leave a supersedes edge from winner to loser");
+    assert_eq!(link_type, "supersedes");
+    // Measured, not assumed: the engine stamps the reason, not a generic
+    // "broken". The edge leaves the active view and keeps saying why.
+    assert_eq!(
+        status, "broken_target_forgotten",
+        "the target is tombstoned, so the edge leaves the active view but stays as provenance"
+    );
+}
+
+
+/// A merge builds a NEW record and tombstones both sources. `merged_from` in
+/// metadata is a blob nobody joins on; these two edges are the path back.
+#[test]
+fn test_resolve_merge_records_derived_from_links_to_both_sources() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid_a = db
+        .record(
+            "the deploy runs on tuesdays",
+            "semantic",
+            0.8,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let rid_b = db
+        .record(
+            "the deploy runs on wednesdays",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let conflict = crate::conflict::create_conflict(
+        &db,
+        &crate::types::ConflictType::IdentityFact,
+        &rid_a,
+        &rid_b,
+        Some("deploy"),
+        Some("weekday"),
+        "conflicting deploy days",
+    )
+    .unwrap();
+
+    let outcome = db
+        .resolve_conflict(
+            &conflict.conflict_id,
+            "merge",
+            None,
+            Some("the deploy runs on tuesdays, verified 2026-11-28"),
+            Some("merged after confirmation"),
+        )
+        .unwrap();
+    let merged = outcome
+        .new_memory_rid
+        .clone()
+        .expect("a merge must report the rid it created");
+
+    let conn = db.conn();
+    for source in [&rid_a, &rid_b] {
+        let (link_type, status): (String, String) = conn
+            .query_row(
+                "SELECT link_type, status FROM record_links \
+                 WHERE source_rid = ?1 AND target_rid = ?2",
+                [merged.as_str(), source.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or_else(|e| panic!("no edge {merged} -> {source}: {e}"));
+        assert_eq!(
+            link_type, "derived_from",
+            "a merge derives from its sources; it does not claim to supersede them"
+        );
+        assert_eq!(status, "broken_target_forgotten");
+    }
+}

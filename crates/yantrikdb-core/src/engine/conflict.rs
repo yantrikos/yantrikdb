@@ -612,6 +612,18 @@ impl YantrikDB {
                 } else {
                     &conflict.memory_a
                 };
+                // Provenance before the tombstone. The resolution decides that
+                // one record beats the other, and that decision is what
+                // `record_links` exists for: `forget` marks the edge
+                // broken_target_forgotten instead of deleting it, so the audit
+                // trail survives while the edge leaves the active view.
+                self.link(
+                    winner,
+                    &RecordLink {
+                        target_rid: loser.to_string(),
+                        link_type: LinkType::Supersedes,
+                    },
+                )?;
                 self.forget(loser)?;
                 loser_tombstoned = true;
                 (Some(winner.to_string()), Some(loser.to_string()))
@@ -623,6 +635,18 @@ impl YantrikDB {
                 } else {
                     &conflict.memory_b
                 };
+                // Provenance before the tombstone. The resolution decides that
+                // one record beats the other, and that decision is what
+                // `record_links` exists for: `forget` marks the edge
+                // broken_target_forgotten instead of deleting it, so the audit
+                // trail survives while the edge leaves the active view.
+                self.link(
+                    winner,
+                    &RecordLink {
+                        target_rid: loser.to_string(),
+                        link_type: LinkType::Supersedes,
+                    },
+                )?;
                 self.forget(loser)?;
                 loser_tombstoned = true;
                 (Some(winner.to_string()), Some(loser.to_string()))
@@ -662,6 +686,21 @@ impl YantrikDB {
                     None,
                 )?;
                 new_memory_rid = Some(rid.clone());
+
+                // A merge builds a NEW record and tombstones both sources.
+                // `metadata.merged_from` is a blob nobody joins on; these two
+                // edges are the path back. `DerivedFrom`, not `Supersedes`: the
+                // merged record is built from both sources and claims no
+                // "newer is better" over them.
+                for source in [&conflict.memory_a, &conflict.memory_b] {
+                    self.link(
+                        &rid,
+                        &RecordLink {
+                            target_rid: source.to_string(),
+                            link_type: LinkType::DerivedFrom,
+                        },
+                    )?;
+                }
 
                 self.forget(&conflict.memory_a)?;
                 self.forget(&conflict.memory_b)?;
