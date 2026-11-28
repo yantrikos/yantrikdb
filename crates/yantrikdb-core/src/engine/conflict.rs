@@ -657,7 +657,7 @@ impl YantrikDB {
                 // claim does, because it is committed WITH the record and
                 // ON CONFLICT DO NOTHING keys it on the conflict id.
                 let merge_key = format!("merge:{conflict_id}");
-                let rid = self.record_with_idempotency(
+                let write = self.record_with_idempotency(
                     text,
                     "semantic",
                     merged_importance,
@@ -672,7 +672,23 @@ impl YantrikDB {
                     None,
                     Some(&merge_key),
                     None,
-                )?;
+                );
+                // The key is the conflict id, so a conflict on it means exactly
+                // one thing: this merge's record already exists. A resume whose
+                // payload differs — the merged importance is max(imp_a, imp_b),
+                // and importance recalibration moves sources in between — must
+                // continue with the record that is there. Refusing here would
+                // leave the conflict open and unresolvable for good, because
+                // every later attempt computes the same new digest.
+                let rid = match write {
+                    Ok(rid) => rid,
+                    Err(YantrikDbError::IdempotencyConflict { existing_rid, .. })
+                        if !existing_rid.is_empty() =>
+                    {
+                        existing_rid
+                    }
+                    Err(e) => return Err(e),
+                };
                 new_memory_rid = Some(rid.clone());
 
                 self.forget(&conflict.memory_a)?;

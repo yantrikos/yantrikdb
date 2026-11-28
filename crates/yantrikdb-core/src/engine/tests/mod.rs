@@ -18,13 +18,13 @@ mod chunking;
 #[cfg(feature = "bundled-embedder")]
 mod claim_chain_gate;
 mod cognition_gates;
-mod merge_idempotency;
 mod consolidate_cluster;
 mod corrections;
 mod created_at;
 mod dimensions;
 mod drafted_facts;
 mod encryption;
+mod merge_idempotency;
 // 0.13.2: 'encrypted means encrypted', verified against the raw file
 // bytes rather than against the engine's own claim.
 #[cfg(feature = "bundled-embedder")]
