@@ -99,7 +99,9 @@ filetime = "0.2"
 # Pack tests hash the host file to prove unmount mutates nothing, and
 # tamper with a sealed pack to prove the content digest catches it.
 blake3 = "1"
-rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
+# `limits` is test-only: the regression test for the bind limit lowers the
+# connection limit to prove the read is chunked. No production code uses it.
+rusqlite = { version = "0.37", features = ["bundled", "hooks", "limits"] }
 
 [[bench]]
 name = "engine_bench"

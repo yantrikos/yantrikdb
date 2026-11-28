@@ -136,67 +136,82 @@ impl<'a> DurableEmbeddingStore<'a> {
         if rids.is_empty() {
             return Ok(HashMap::new());
         }
-        let placeholders: String = (0..rids.len())
-            .map(|i| format!("?{}", i + 1))
-            .collect::<Vec<_>>()
-            .join(",");
-        // The `embedding_generation IS NULL` -> 0 mapping is the
-        // brainstorm-4 §6 convention for pre-v28 rows. Done in SQL
-        // via COALESCE so callers always receive a u64.
-        let sql = format!(
-            "SELECT rid, embedding, COALESCE(embedding_generation, 0) \
-             FROM memories WHERE rid IN ({placeholders})"
-        );
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        for r in rids {
-            param_values.push(Box::new(r.to_string()));
-        }
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
-            param_values.iter().map(|p| p.as_ref()).collect();
-
+        // SQLite binds at most SQLITE_LIMIT_VARIABLE_NUMBER parameters per
+        // statement (32_766 on current builds). The caller on a recall path
+        // passes the whole scoped candidate set — on a store above that size
+        // one `IN (?1,…,?N)` is not executable at all: the read fails with
+        // "variable number must be between ?1 and ?32766" instead of returning
+        // rows, and the whole recall errors out. Split the lookup into chunks
+        // the same way the supersedes lookup in `recall.rs` and the pack
+        // reader already do (`engine::pack::SQL_IN_CHUNK`).
+        //
+        // This is a pure split of one lookup, not a change of semantics: the
+        // set of rows read, their content, the absent-rid rule (no map entry)
+        // and the caller's generation policy below are all unchanged. The map
+        // is keyed by rid, so chunk order cannot influence the result.
+        let mut map = HashMap::with_capacity(rids.len());
         let conn = self.db.read_conn();
-        let mut stmt = conn.prepare(&sql)?;
-        // `embedding` is read as Option: a NULL column (e.g. a replication
-        // follower materialized from record ops, whose oplog carries only
-        // the embedding HASH — replication.rs materialize_op note) means
-        // "this rid has no durable vector yet". Before #149 phase 2 that
-        // row was unreachable by every caller of this reader, so the NULL
-        // was never observed; the valid-time universe lane now reads
-        // eligible rows the vector index has never seen, and one NULL must
-        // mean an absent map key (the miss every caller already handles),
-        // not a hard error that fails the whole batched read.
-        let rows: Vec<(String, Option<Vec<u8>>, i64)> = stmt
-            .query_map(params_ref.as_slice(), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<Vec<u8>>>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        drop(stmt);
-        drop(conn);
-
-        let mut map = HashMap::new();
-        for (rid, stored_emb, generation) in rows {
-            let Some(stored_emb) = stored_emb else {
-                continue;
-            };
-            // Decrypt under the engine's at-rest encryption (no-op
-            // if encryption is disabled). The brainstorm-4 §5
-            // contract: this module is the sole caller of
-            // decrypt_embedding for durable rows on read paths
-            // (record/storage are write paths and stay separate).
-            let bytes = self.db.decrypt_embedding(&stored_emb)?;
-            let bytes = decompress_if_cold(bytes);
-            map.insert(
-                rid,
-                EmbeddingWithGeneration {
-                    bytes,
-                    generation: generation as u64,
-                },
+        for chunk in rids.chunks(crate::engine::pack::SQL_IN_CHUNK) {
+            let placeholders: String = (0..chunk.len())
+                .map(|i| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(",");
+            // The `embedding_generation IS NULL` -> 0 mapping is the
+            // brainstorm-4 §6 convention for pre-v28 rows. Done in SQL
+            // via COALESCE so callers always receive a u64.
+            let sql = format!(
+                "SELECT rid, embedding, COALESCE(embedding_generation, 0) \
+                 FROM memories WHERE rid IN ({placeholders})"
             );
+            let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            for r in chunk {
+                param_values.push(Box::new(r.to_string()));
+            }
+            let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+                param_values.iter().map(|p| p.as_ref()).collect();
+
+            let mut stmt = conn.prepare(&sql)?;
+            // `embedding` is read as Option: a NULL column (e.g. a replication
+            // follower materialized from record ops, whose oplog carries only
+            // the embedding HASH — replication.rs materialize_op note) means
+            // "this rid has no durable vector yet". Before #149 phase 2 that
+            // row was unreachable by every caller of this reader, so the NULL
+            // was never observed; the valid-time universe lane now reads
+            // eligible rows the vector index has never seen, and one NULL must
+            // mean an absent map key (the miss every caller already handles),
+            // not a hard error that fails the whole batched read.
+            let rows: Vec<(String, Option<Vec<u8>>, i64)> = stmt
+                .query_map(params_ref.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+
+            for (rid, stored_emb, generation) in rows {
+                let Some(stored_emb) = stored_emb else {
+                    continue;
+                };
+                // Decrypt under the engine's at-rest encryption (no-op
+                // if encryption is disabled). The brainstorm-4 §5
+                // contract: this module is the sole caller of
+                // decrypt_embedding for durable rows on read paths
+                // (record/storage are write paths and stay separate).
+                let bytes = self.db.decrypt_embedding(&stored_emb)?;
+                let bytes = decompress_if_cold(bytes);
+                map.insert(
+                    rid,
+                    EmbeddingWithGeneration {
+                        bytes,
+                        generation: generation as u64,
+                    },
+                );
+            }
         }
+        drop(conn);
         Ok(map)
     }
 
@@ -479,5 +494,177 @@ mod tests {
             offenders.len(),
             offenders.join("\n")
         );
+    }
+}
+
+/// Regression: the candidate set of a recall can exceed SQLite's bind limit.
+///
+/// `read_embeddings_for_rids` used to emit ONE statement with one placeholder
+/// per rid. Above SQLITE_LIMIT_VARIABLE_NUMBER (32_766 on the bundled build)
+/// that statement cannot be prepared at all, so a whole recall over a store of
+/// that size failed with `variable number must be between ?1 and ?32766`
+/// instead of returning rows. These tests pin the three sizes around the
+/// limit: one below, exactly at it, one above.
+#[cfg(test)]
+mod chunking_tests {
+    use super::*;
+    use rusqlite::{params, Connection};
+
+    /// Seed `n` rows outside the engine: 33k `record()` calls would take
+    /// minutes, and the property under test is the bind count of the reader,
+    /// not the write path.
+    fn seed_bulk(path: &std::path::Path, n: usize, dim: usize) -> Vec<String> {
+        let conn = Connection::open(path).unwrap();
+        let blob = vec![0u8; dim * 4];
+        conn.execute(
+            "INSERT INTO memories (rid, text, type, created_at, updated_at, last_access, embedding, namespace)
+             WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < ?1)
+             SELECT printf('chunk-test-%06d', i), printf('row %d', i), 'episodic',
+                    1.0, 1.0, 1.0, ?2, 'default' FROM seq",
+            params![n as i64, blob],
+        )
+        .unwrap();
+        // The read under test is reached from the graph lane, whose candidate
+        // list is the records sharing an entity. Without these rows the
+        // candidate set stays tiny and the bind limit is never approached —
+        // the test would pass on the unfixed code.
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) \
+             SELECT rid, 'shared-entity' FROM memories",
+            [],
+        )
+        .unwrap();
+        (1..=n).map(|i| format!("chunk-test-{i:06}")).collect()
+    }
+
+    fn boundary_case(n: usize) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db");
+        // Create the schema through the engine, then release the file before
+        // the bulk insert.
+        drop(YantrikDB::new(path.to_str().unwrap(), 8).unwrap());
+        let rids = seed_bulk(&path, n, 8);
+        let db = YantrikDB::new(path.to_str().unwrap(), 8).unwrap();
+        let store = DurableEmbeddingStore::new(&db);
+        let refs: Vec<&str> = rids.iter().map(|s| s.as_str()).collect();
+        let map = store.read_embeddings_for_rids(&refs).unwrap();
+        assert_eq!(map.len(), n, "every seeded row must come back at {n} rids");
+    }
+
+    // Opt-in: seeds 33k rows and pays a full open per case (minutes in a
+    // debug build). Run with `cargo test --lib chunking_tests -- --ignored`.
+    #[test]
+    #[ignore = "seeds 33k rows; minutes in a debug build"]
+    fn one_below_the_variable_limit() {
+        boundary_case(32_765);
+    }
+
+    // Opt-in: seeds 33k rows and pays a full open per case (minutes in a
+    // debug build). Run with `cargo test --lib chunking_tests -- --ignored`.
+    #[test]
+    #[ignore = "seeds 33k rows; minutes in a debug build"]
+    fn exactly_at_the_variable_limit() {
+        boundary_case(32_766);
+    }
+
+    // Opt-in: seeds 33k rows and pays a full open per case (minutes in a
+    // debug build). Run with `cargo test --lib chunking_tests -- --ignored`.
+    #[test]
+    #[ignore = "seeds 33k rows; minutes in a debug build"]
+    fn one_above_the_variable_limit() {
+        boundary_case(32_767);
+    }
+
+    /// The same guard for the ordinary case: a set spanning several chunks
+    /// must come back complete, and a rid that does not exist stays absent
+    /// instead of failing the whole read.
+    #[test]
+    fn chunk_boundary_keeps_every_row_and_the_absent_rid_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db");
+        drop(YantrikDB::new(path.to_str().unwrap(), 8).unwrap());
+        let n = crate::engine::pack::SQL_IN_CHUNK + 7;
+        let mut rids = seed_bulk(&path, n, 8);
+        rids.push("does-not-exist".to_string());
+        let db = YantrikDB::new(path.to_str().unwrap(), 8).unwrap();
+        let store = DurableEmbeddingStore::new(&db);
+        let refs: Vec<&str> = rids.iter().map(|s| s.as_str()).collect();
+        let map = store.read_embeddings_for_rids(&refs).unwrap();
+        assert_eq!(map.len(), n, "the absent rid must not create an entry");
+        assert!(!map.contains_key("does-not-exist"));
+    }
+
+    /// Discriminating and cheap: lower the connection's bind limit, then read more
+    /// rids than that limit allows. A single `IN (...)` cannot be prepared (the old
+    /// code), chunking can. `SQL_IN_CHUNK` is 500, so the lowered limit equals the
+    /// chunk size and each statement binds exactly at the boundary.
+    #[test]
+    fn chunking_is_what_makes_an_oversized_read_possible() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db");
+        drop(YantrikDB::new(path.to_str().unwrap(), 8).unwrap());
+        let n = crate::engine::pack::SQL_IN_CHUNK * 2 + 300;
+        let rids = seed_bulk(&path, n, 8);
+        let db = YantrikDB::new(path.to_str().unwrap(), 8).unwrap();
+        let default = lower_bind_limit_on_every_read_connection(&db);
+        // Premises, stated so a green run cannot come from the wrong reason:
+        // without chunking, `n` rids fit into one statement on this build, and
+        // with the limit lowered to `SQL_IN_CHUNK` they no longer do.
+        assert!(
+            default >= n as i32,
+            "premise: {n} rids must fit the default bind limit ({default}) in one statement, \
+             otherwise the unfixed reader would fail for a different reason"
+        );
+        assert!(
+            n as i32 > crate::engine::pack::SQL_IN_CHUNK as i32,
+            "premise: {n} rids must exceed the lowered limit ({})",
+            crate::engine::pack::SQL_IN_CHUNK
+        );
+        let store = DurableEmbeddingStore::new(&db);
+        let refs: Vec<&str> = rids.iter().map(|s| s.as_str()).collect();
+        let map = store.read_embeddings_for_rids(&refs).unwrap();
+        assert_eq!(
+            map.len(),
+            n,
+            "{n} rids with a {}-parameter limit",
+            crate::engine::pack::SQL_IN_CHUNK
+        );
+    }
+
+    /// Lower `SQLITE_LIMIT_VARIABLE_NUMBER` to `SQL_IN_CHUNK` on **every**
+    /// connection the reader can draw from, and return the build's default
+    /// limit.
+    ///
+    /// `read_conn()` hands the pool out round-robin. An earlier version of the
+    /// test above lowered the limit on the one connection its own `read_conn()`
+    /// call returned; the reader then took the *next* slot, still at the
+    /// default limit, and 1,300 rids went through a single statement with the
+    /// unfixed reader — the test was green on `main` and proved nothing. Since
+    /// `set_limit` persists on the connection, taking every slot once and
+    /// releasing it again is enough.
+    fn lower_bind_limit_on_every_read_connection(db: &YantrikDB) -> i32 {
+        use rusqlite::limits::Limit;
+        let lowered = crate::engine::pack::SQL_IN_CHUNK as i32;
+        let slots = db.read_conns.len();
+        let mut guards = Vec::with_capacity(slots.max(1));
+        // An empty pool (`YANTRIKDB_READ_POOL=0`) falls back to the write
+        // connection, which is then the one connection the reader uses.
+        for _ in 0..slots.max(1) {
+            let conn = db.read_conn();
+            let default = conn.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER).unwrap();
+            conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, lowered)
+                .unwrap();
+            guards.push((conn, default));
+        }
+        let default = guards[0].1;
+        for (conn, _) in &guards {
+            assert_eq!(
+                conn.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER).unwrap(),
+                lowered,
+                "every pooled connection must carry the lowered limit, \
+                 otherwise the reader may use one that does not"
+            );
+        }
+        default
     }
 }
