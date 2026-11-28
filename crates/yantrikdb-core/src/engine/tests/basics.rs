@@ -1418,3 +1418,438 @@ fn test_stats_include_conflicts() {
     assert_eq!(s.open_conflicts, 1);
     assert_eq!(s.resolved_conflicts, 0);
 }
+
+/// The resolution decides that one record beats the other. That decision has to
+/// survive as an edge: without it the only trace of the loser is a tombstone in
+/// `memories` and a summary line in `conflicts`, and nothing a caller can walk.
+#[test]
+fn test_resolve_keep_a_records_supersedes_link() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid_a = db
+        .record(
+            "birthday March 5",
+            "episodic",
+            0.9,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let rid_b = db
+        .record(
+            "birthday March 15",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let conflict = crate::conflict::create_conflict(
+        &db,
+        &crate::types::ConflictType::IdentityFact,
+        &rid_a,
+        &rid_b,
+        Some("User"),
+        Some("birthday"),
+        "conflicting birthdays",
+    )
+    .unwrap();
+
+    db.resolve_conflict(
+        &conflict.conflict_id,
+        "keep_a",
+        Some(&rid_a),
+        None,
+        Some("User confirmed March 5"),
+    )
+    .unwrap();
+
+    let conn = db.conn();
+    let (link_type, status): (String, String) = conn
+        .query_row(
+            "SELECT link_type, status FROM record_links \
+             WHERE source_rid = ?1 AND target_rid = ?2",
+            [rid_a.as_str(), rid_b.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("the resolution must leave a supersedes edge from winner to loser");
+    assert_eq!(link_type, "supersedes");
+    // Measured, not assumed: the engine stamps the reason, not a generic
+    // "broken". The edge leaves the active view and keeps saying why.
+    assert_eq!(
+        status, "broken_target_forgotten",
+        "the target is tombstoned, so the edge leaves the active view but stays as provenance"
+    );
+}
+
+/// A merge builds a NEW record and tombstones both sources. `merged_from` in
+/// metadata is a blob nobody joins on; these two edges are the path back.
+#[test]
+fn test_resolve_merge_records_derived_from_links_to_both_sources() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid_a = db
+        .record(
+            "the deploy runs on tuesdays",
+            "semantic",
+            0.8,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let rid_b = db
+        .record(
+            "the deploy runs on wednesdays",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let conflict = crate::conflict::create_conflict(
+        &db,
+        &crate::types::ConflictType::IdentityFact,
+        &rid_a,
+        &rid_b,
+        Some("deploy"),
+        Some("weekday"),
+        "conflicting deploy days",
+    )
+    .unwrap();
+
+    let outcome = db
+        .resolve_conflict(
+            &conflict.conflict_id,
+            "merge",
+            None,
+            Some("the deploy runs on tuesdays, verified 2026-11-28"),
+            Some("merged after confirmation"),
+        )
+        .unwrap();
+    let merged = outcome
+        .new_memory_rid
+        .clone()
+        .expect("a merge must report the rid it created");
+
+    let conn = db.conn();
+    for source in [&rid_a, &rid_b] {
+        let (link_type, status): (String, String) = conn
+            .query_row(
+                "SELECT link_type, status FROM record_links \
+                 WHERE source_rid = ?1 AND target_rid = ?2",
+                [merged.as_str(), source.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or_else(|e| panic!("no edge {merged} -> {source}: {e}"));
+        assert_eq!(
+            link_type, "derived_from",
+            "a merge derives from its sources; it does not claim to supersede them"
+        );
+        assert_eq!(status, "broken_target_forgotten");
+    }
+}
+
+// -- the audit edge must never veto the resolution (review on #336) ----------
+
+/// The loser already has a selected successor, so the gate refuses the edge.
+/// The resolution must still happen — `main` resolves this conflict too.
+#[test]
+fn resolve_survives_a_refused_edge_because_the_loser_has_a_successor() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let a = db
+        .record(
+            "value is nine",
+            "semantic",
+            0.8,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let b = db
+        .record(
+            "value is ten",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let c = db
+        .record(
+            "value is eleven",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.5, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    db.link(
+        &c,
+        &crate::types::RecordLink {
+            target_rid: b.clone(),
+            link_type: crate::types::LinkType::Supersedes,
+        },
+    )
+    .unwrap();
+
+    let conflict = crate::conflict::create_conflict(
+        &db,
+        &crate::types::ConflictType::IdentityFact,
+        &a,
+        &b,
+        Some("value"),
+        Some("digits"),
+        "conflicting digits",
+    )
+    .unwrap();
+
+    let out = db.resolve_conflict(
+        &conflict.conflict_id,
+        "keep_a",
+        Some(&a),
+        None,
+        Some("nine"),
+    );
+    assert!(
+        out.is_ok(),
+        "a refused audit edge must not block the resolution: {:?}",
+        out.err()
+    );
+
+    let edges = db
+        .linked_records(&a, crate::types::LinkDirection::Outbound, None)
+        .unwrap();
+    assert!(edges.is_empty(), "the refused edge must not exist");
+    let st: String = db
+        .conn()
+        .query_row(
+            "SELECT consolidation_status FROM memories WHERE rid = ?1",
+            [b.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(st, "tombstoned", "the loser is tombstoned either way");
+}
+
+/// The edge would close a supersedes chain, so the gate refuses it.
+#[test]
+fn resolve_survives_a_refused_edge_that_would_close_a_cycle() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let a = db
+        .record(
+            "value is nine",
+            "semantic",
+            0.8,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let b = db
+        .record(
+            "value is ten",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    // b supersedes a, so a -> b would close the chain.
+    db.link(
+        &b,
+        &crate::types::RecordLink {
+            target_rid: a.clone(),
+            link_type: crate::types::LinkType::Supersedes,
+        },
+    )
+    .unwrap();
+
+    let conflict = crate::conflict::create_conflict(
+        &db,
+        &crate::types::ConflictType::IdentityFact,
+        &a,
+        &b,
+        Some("value"),
+        Some("digits"),
+        "conflicting digits",
+    )
+    .unwrap();
+
+    let out = db.resolve_conflict(
+        &conflict.conflict_id,
+        "keep_a",
+        Some(&a),
+        None,
+        Some("nine"),
+    );
+    assert!(
+        out.is_ok(),
+        "a cycle-forming audit edge must not block the resolution: {:?}",
+        out.err()
+    );
+    let status: String = db
+        .conn()
+        .query_row(
+            "SELECT status FROM conflicts WHERE conflict_id = ?1",
+            [conflict.conflict_id.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "resolved");
+}
+
+/// The chain walk has a cap. When it hits, the gate refuses the edge with
+/// `ChainTraversalLimit` — the resolution must still happen. This is its own
+/// case: the walk gives up on depth, not on a conflict or a cycle.
+#[test]
+fn resolve_survives_a_chain_that_hits_the_traversal_cap() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let a = db
+        .record(
+            "value is nine",
+            "semantic",
+            0.8,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let b = db
+        .record(
+            "value is ten",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    // A supersedes chain leaving the loser, longer than CHAIN_WALK_CAP.
+    {
+        let conn = db.conn();
+        let mut prev = b.clone();
+        for i in 0..(crate::engine::links::CHAIN_WALK_CAP + 5) {
+            let next = format!("chain-{i:05}");
+            conn.execute(
+                "INSERT INTO record_links (link_id, source_rid, target_rid, link_type, \
+                 status, selection_state, created_at, hlc, origin_actor) \
+                 VALUES (?1, ?2, ?3, 'supersedes', 'active', 'selected', 1.0, x'00', 'test')",
+                rusqlite::params![format!("edge-{i:05}"), prev, next],
+            )
+            .unwrap();
+            prev = next;
+        }
+    }
+
+    let conflict = crate::conflict::create_conflict(
+        &db,
+        &crate::types::ConflictType::IdentityFact,
+        &a,
+        &b,
+        Some("value"),
+        Some("digits"),
+        "conflicting digits",
+    )
+    .unwrap();
+
+    let out = db.resolve_conflict(
+        &conflict.conflict_id,
+        "keep_a",
+        Some(&a),
+        None,
+        Some("nine"),
+    );
+    assert!(
+        out.is_ok(),
+        "a chain that hits the walk cap must not block the resolution: {:?}",
+        out.err()
+    );
+    let status: String = db
+        .conn()
+        .query_row(
+            "SELECT status FROM conflicts WHERE conflict_id = ?1",
+            [conflict.conflict_id.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "resolved");
+    let edges = db
+        .linked_records(&a, crate::types::LinkDirection::Outbound, None)
+        .unwrap();
+    assert!(edges.is_empty(), "the refused edge must not exist");
+}
