@@ -606,21 +606,20 @@ mod chunking_tests {
         let n = crate::engine::pack::SQL_IN_CHUNK * 2 + 300;
         let rids = seed_bulk(&path, n, 8);
         let db = YantrikDB::new(path.to_str().unwrap(), 8).unwrap();
-        {
-            let conn = db.read_conn();
-            let default = conn
-                .limit(rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER)
-                .unwrap();
-            assert!(
-                default >= crate::engine::pack::SQL_IN_CHUNK as i32,
-                "the chunk size must fit the build's bind limit"
-            );
-            conn.set_limit(
-                rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER,
-                crate::engine::pack::SQL_IN_CHUNK as i32,
-            )
-            .unwrap();
-        }
+        let default = lower_bind_limit_on_every_read_connection(&db);
+        // Premises, stated so a green run cannot come from the wrong reason:
+        // without chunking, `n` rids fit into one statement on this build, and
+        // with the limit lowered to `SQL_IN_CHUNK` they no longer do.
+        assert!(
+            default >= n as i32,
+            "premise: {n} rids must fit the default bind limit ({default}) in one statement, \
+             otherwise the unfixed reader would fail for a different reason"
+        );
+        assert!(
+            n as i32 > crate::engine::pack::SQL_IN_CHUNK as i32,
+            "premise: {n} rids must exceed the lowered limit ({})",
+            crate::engine::pack::SQL_IN_CHUNK
+        );
         let store = DurableEmbeddingStore::new(&db);
         let refs: Vec<&str> = rids.iter().map(|s| s.as_str()).collect();
         let map = store.read_embeddings_for_rids(&refs).unwrap();
@@ -630,5 +629,42 @@ mod chunking_tests {
             "{n} rids with a {}-parameter limit",
             crate::engine::pack::SQL_IN_CHUNK
         );
+    }
+
+    /// Lower `SQLITE_LIMIT_VARIABLE_NUMBER` to `SQL_IN_CHUNK` on **every**
+    /// connection the reader can draw from, and return the build's default
+    /// limit.
+    ///
+    /// `read_conn()` hands the pool out round-robin. An earlier version of the
+    /// test above lowered the limit on the one connection its own `read_conn()`
+    /// call returned; the reader then took the *next* slot, still at the
+    /// default limit, and 1,300 rids went through a single statement with the
+    /// unfixed reader — the test was green on `main` and proved nothing. Since
+    /// `set_limit` persists on the connection, taking every slot once and
+    /// releasing it again is enough.
+    fn lower_bind_limit_on_every_read_connection(db: &YantrikDB) -> i32 {
+        use rusqlite::limits::Limit;
+        let lowered = crate::engine::pack::SQL_IN_CHUNK as i32;
+        let slots = db.read_conns.len();
+        let mut guards = Vec::with_capacity(slots.max(1));
+        // An empty pool (`YANTRIKDB_READ_POOL=0`) falls back to the write
+        // connection, which is then the one connection the reader uses.
+        for _ in 0..slots.max(1) {
+            let conn = db.read_conn();
+            let default = conn.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER).unwrap();
+            conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, lowered)
+                .unwrap();
+            guards.push((conn, default));
+        }
+        let default = guards[0].1;
+        for (conn, _) in &guards {
+            assert_eq!(
+                conn.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER).unwrap(),
+                lowered,
+                "every pooled connection must carry the lowered limit, \
+                 otherwise the reader may use one that does not"
+            );
+        }
+        default
     }
 }
